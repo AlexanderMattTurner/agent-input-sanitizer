@@ -70,9 +70,15 @@ const { cleaned, found, warnings } = await sanitize(untrustedText);
 // Opt into the HTML layers (Layers 2 & 3) for web/HTML ingress:
 const result = await sanitize(fetchedPageSource, { html: true });
 //   result.cleaned   — hidden HTML spliced out, placeholders left in place
-//   result.found     — categories neutralized (e.g. ["Format chars (Cf)", "hidden HTML"])
+//   result.found     — stable category codes neutralized (e.g. ["cf-format", "hidden-html"])
 //   result.warnings  — human-facing notices (long-run alerts, exfil reasons, …)
 ```
+
+`found` holds **stable machine-readable codes** (`cf-format`,
+`variation-selectors`, `blank-fillers`, `ansi`, `lone-surrogates`,
+`html-comments`, `hidden-html`, `exfil-urls`)—branch on these. Human-facing
+prose lives in `warnings`; the `CATEGORY` enum and the `CATEGORY_LABELS`
+code→label map are exported if you need them.
 
 `sanitize` never throws and never silently drops content: any change to the text
 is accompanied by at least one entry in `warnings`.
@@ -87,7 +93,7 @@ import {
 
 stripInvisible(text); // -> cleaned string
 const { cleaned, found } = stripInvisibleWithReport(text);
-//   found names exactly the categories removed, e.g. ["Variation selectors"]
+//   found names exactly the category codes removed, e.g. ["variation-selectors"]
 ```
 
 This entry pulls in **no runtime dependencies**.
@@ -120,9 +126,9 @@ const reason = checkExfilUrl(oneUrl); // null or a string reason
 dependency-free, so re-exporting them never pulls in the heavy HTML graph).
 
 `agent-input-sanitizer/invisible` — `stripInvisible`, `stripInvisibleWithReport`,
-`isSgrOnly`, and the constants `STRIP`, `SGR_RE`, `CHECKS`, `VS`,
-`BLANK_NON_CF`, `LONG_RUN_RE`, `LONG_RUN_THRESHOLD`, `SCATTERED_THRESHOLD`,
-`LINGUISTIC_SCRIPTS`.
+`isSgrOnly`, and the constants `STRIP`, `SGR_RE`, `CHECKS`, `CATEGORY`,
+`CATEGORY_LABELS`, `VS`, `BLANK_NON_CF`, `LONG_RUN_RE`, `LONG_RUN_THRESHOLD`,
+`SCATTERED_THRESHOLD`, `LINGUISTIC_SCRIPTS`.
 
 `agent-input-sanitizer/html` — `sanitizeHtml`, `scanHtmlFragment`,
 `looksLikeHtmlSource`, `spliceRanges`, `isHiddenStyle`, `isHiddenElement`,
@@ -134,8 +140,8 @@ constants `REPORTED_TAGS`, `COMMENT_PLACEHOLDER`, `HIDDEN_PLACEHOLDER`,
 ## Development
 
 ```sh
-npm test            # node --test
-npm run coverage    # c8, enforced at 100% lines/branches/functions
+npm test            # c8 node --test (coverage enforced at 100% lines/branches/functions)
+npm run coverage    # alias of the above, explicit
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit (the source is typed via JSDoc)
 ```
