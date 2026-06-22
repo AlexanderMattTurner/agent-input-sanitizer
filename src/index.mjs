@@ -56,12 +56,20 @@ const CONTROL_INTRODUCER_RE = /[\u001b\u009b]/g;
 
 // Full ANSI escape grammar (CSI/SGR/OSC-with-BEL), not just SGR: the Layer-1
 // guarantee is that no control introducer survives, and a cursor-move or
-// erase sequence is as much a display-spoofing hazard as a color one. The
-// pattern is linear (every quantified run is bounded or non-overlapping), so it
-// carries no catastrophic-backtracking risk on adversarial input.
+// erase sequence is as much a display-spoofing hazard as a color one.
+//
+// The intermediate-byte run is an atomic group — `(?=(X))\1`, a lookahead that
+// captures the greedy run and a backreference that consumes it without giving
+// any back. `[[\]()#;?]*` shares `;`/`#` with the parameter groups that follow,
+// so a plain `*` lets a non-terminated sequence (`ESC` + many `;#`) be
+// re-partitioned between the two on backtracking — the quadratic blow-up
+// CodeQL's js/polynomial-redos flags. Refusing to backtrack into the run kills
+// it while matching the exact same language: the run only ever meets a
+// parameter byte at a non-`[[\]()#;?]` boundary, so the split is unambiguous
+// for every real sequence.
 // prettier-ignore
 // eslint-disable-next-line no-control-regex -- matching ESC-led sequences is the point
-const ANSI_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
+const ANSI_RE = /[\u001b\u009b](?=([[\]()#;?]*))\1(?:(?:(?:(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
 
 // Unpaired UTF-16 surrogates (high not followed by low, or low not preceded by
 // high). Normalized before the HTML parser, which throws on a stray byte —

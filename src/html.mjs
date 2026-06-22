@@ -589,6 +589,25 @@ const SCRIPT_URI_RE = /^\s*(?:javascript|vbscript):/i;
 
 const RELATIVE_URL_BASE = "http://relative.invalid";
 
+/**
+ * True when `url` is a relative reference (no scheme/authority of its own, so it
+ * only resolves against a base). Decided by parsing standalone: an absolute URL
+ * parses without a base, a relative one throws. This is the structural question
+ * a raw `url.startsWith(RELATIVE_URL_BASE)` only approximated — and that string
+ * prefix test also matched absolute URLs the sentinel host is a prefix of
+ * (`http://relative.invalid.evil.example`), which this does not.
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isRelativeUrl(url) {
+  try {
+    new URL(url);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 // Parameter NAMES that legitimately carry a LONG opaque (base64/hex) value, so
 // a blob in one of them is NOT exfil: CDN request-signing (AWS SigV4 /
 // CloudFront `X-Amz-*`/`Signature`/`Policy`/`Key-Pair-Id`, GCS `X-Goog-*`,
@@ -779,10 +798,7 @@ export function urlHost(url) {
     // WHATWG rejects (e.g. a non-ASCII host).
     return "(unparsable URL)";
   }
-  if (
-    parsed.origin === RELATIVE_URL_BASE &&
-    !url.startsWith(RELATIVE_URL_BASE)
-  ) {
+  if (parsed.origin === RELATIVE_URL_BASE && isRelativeUrl(url)) {
     return "(relative URL)";
   }
   return parsed.host;
@@ -803,9 +819,7 @@ function isOffOrigin(url) {
   } catch {
     return false;
   }
-  return (
-    parsed.origin !== RELATIVE_URL_BASE || url.startsWith(RELATIVE_URL_BASE)
-  );
+  return parsed.origin !== RELATIVE_URL_BASE || !isRelativeUrl(url);
 }
 
 /**

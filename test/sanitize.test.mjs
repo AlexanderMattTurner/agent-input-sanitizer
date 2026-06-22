@@ -58,6 +58,23 @@ describe("sanitize: Layer 1 ESC neutralization + idempotency", () => {
     });
   }
 
+  it("strips an adversarial unterminated escape (`;#` pump) in linear time", async () => {
+    // js/polynomial-redos guard: the ANSI grammar's intermediate-byte run
+    // shares `;`/`#` with its parameter groups, so a plain `*` backtracks
+    // quadratically on `ESC` + many `;#` with no terminator. The atomic group
+    // makes it linear. 50k pumps ran in ~0.3ms post-fix and minutes pre-fix;
+    // the 5s bound is loose enough to never flake yet catch a regression.
+    const input = `${ESC}${";#".repeat(50_000)}`;
+    const start = process.hrtime.bigint();
+    const out = await sanitize(input);
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    assert.ok(!out.cleaned.includes(ESC), "ESC survived");
+    assert.ok(
+      elapsedMs < 5_000,
+      `stripping took ${elapsedMs.toFixed(1)}ms — possible ReDoS regression`,
+    );
+  });
+
   it("leaves clean text untouched (no spurious modification)", async () => {
     const out = await sanitize("plain text, no escapes");
     assert.equal(out.cleaned, "plain text, no escapes");

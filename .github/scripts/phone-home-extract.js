@@ -6,6 +6,27 @@ const fs = require("fs");
 const MIN_CONTENT_LENGTH = 10;
 const PHONE_HOME_DIR = "/tmp/phone-home";
 
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+
+/**
+ * Strip HTML comments to a fixed point. A single pass is incomplete: removing
+ * one `<!-- ... -->` can splice its neighbours into a brand-new `<!--`
+ * introducer the same pass already scanned past (e.g. `<!-<!-- -->->` →
+ * `<!-->`), so iterate until the string stops changing. Each changed pass
+ * consumes at least one comment, so the count is bounded by the input length.
+ * @param {string} text
+ * @returns {string}
+ */
+function stripHtmlComments(text) {
+  let prev = text;
+  let out = prev.replace(HTML_COMMENT_RE, "");
+  while (out !== prev) {
+    prev = out;
+    out = prev.replace(HTML_COMMENT_RE, "");
+  }
+  return out;
+}
+
 /**
  * Extract "Lessons Learned" from a merged PR body, filter noise, and write
  * the cleaned text to a temp file for gitleaks scanning.
@@ -52,9 +73,9 @@ module.exports = async ({ context, core }) => {
 
   // Strip HTML comments first with a newline-aware pattern so multi-line
   // <!-- ... --> placeholders are removed too (a per-line /^<!--.*-->$/ only
-  // catches single-line comments).
-  const filtered = lessons
-    .replace(/<!--[\s\S]*?-->/g, "")
+  // catches single-line comments), iterating to a fixed point so removals that
+  // splice a new comment marker together don't survive.
+  const filtered = stripHtmlComments(lessons)
     .split("\n")
     .filter((line) => !line.trim().match(/^<[^>]*>$/))
     .filter(

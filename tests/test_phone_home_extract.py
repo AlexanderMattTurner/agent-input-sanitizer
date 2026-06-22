@@ -172,3 +172,24 @@ def test_filters_session_links(tmp_path: Path) -> None:
     assert outputs.get("has_lessons") == "true"
     content = (PHONE_HOME_DIR / "lessons.txt").read_text()
     assert "claude.ai" not in content
+
+
+def test_strips_multiline_and_nested_html_comments(tmp_path: Path) -> None:
+    """HTML comments (including a multi-line and a nested one) must be removed so
+    no commented-out payload reaches the phone-home scan."""
+    pr_body = (
+        "## Lessons Learned\n\n"
+        "- Real lesson kept.\n"
+        "<!-- DROP secret-one\nspanning lines -->\n"
+        "- Another lesson.\n"
+        "<!-- outer <!-- secret-two --> -->\n"
+    )
+    outputs, result = run_extract(tmp_path, pr_body)
+    assert result.returncode == 0, result.stderr
+    assert outputs.get("has_lessons") == "true"
+    content = (PHONE_HOME_DIR / "lessons.txt").read_text()
+    assert "Real lesson kept." in content
+    assert "Another lesson." in content
+    assert "secret-one" not in content
+    assert "spanning lines" not in content
+    assert "secret-two" not in content
