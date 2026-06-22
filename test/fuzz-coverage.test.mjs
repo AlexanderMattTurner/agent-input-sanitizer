@@ -54,12 +54,22 @@ const testDir = path.join(repoRoot, "test");
 // excluded: it names every required function as a string literal (and contains
 // the "fc.assert(" sentinel itself), so scanning it would pass vacuously.
 const selfName = path.basename(fileURLToPath(import.meta.url));
+
+// Strip import statements and comments so a required name only counts when it
+// appears in actual test code — a function listed in an `import {…}` or named
+// in a comment is NOT evidence that a property exercises it.
+const stripImportsAndComments = (source) =>
+  source
+    .replace(/^import\b[\s\S]*?from\s+["'][^"']+["'];?[ \t]*$/gm, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
 const fuzzFiles = readdirSync(testDir)
   .filter((name) => name.endsWith(".test.mjs") && name !== selfName)
-  .map((name) => ({
-    name,
-    source: readFileSync(path.join(testDir, name), "utf8"),
-  }))
+  .map((name) => {
+    const source = readFileSync(path.join(testDir, name), "utf8");
+    return { name, source, code: stripImportsAndComments(source) };
+  })
   .filter((file) => file.source.includes("fc.assert("));
 
 const exportedFunctions = new Map(
@@ -88,7 +98,7 @@ describe("fuzz-coverage obligation gate", () => {
 
     it(`'${name}' is referenced by a fast-check suite`, () => {
       const wordRe = new RegExp(`\\b${name}\\b`);
-      const hits = fuzzFiles.filter((file) => wordRe.test(file.source));
+      const hits = fuzzFiles.filter((file) => wordRe.test(file.code));
       assert.ok(
         hits.length > 0,
         `${name} handles untrusted input but no property/fuzz suite references it`,

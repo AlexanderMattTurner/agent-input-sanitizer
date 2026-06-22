@@ -30,14 +30,15 @@ const safeText = fc
   .array(safeChar, { minLength: 0, maxLength: 60 })
   .map((chars) => chars.join(""));
 
-// A range generator parameterized on the text length: 0 <= start <= end <= len,
-// kind comment|hidden. Overlaps/nesting/adjacency/duplicates arise naturally.
-const rangesFor = (len) =>
+// A range generator with indices in [0, maxIndex]: start = min, end = max, kind
+// comment|hidden. Overlaps/nesting/adjacency/duplicates arise naturally. Callers
+// pass `len` for in-bounds ranges or `len + n` to probe out-of-bounds handling.
+const rangesUpTo = (maxIndex) =>
   fc.array(
     fc
       .tuple(
-        fc.integer({ min: 0, max: len }),
-        fc.integer({ min: 0, max: len }),
+        fc.integer({ min: 0, max: maxIndex }),
+        fc.integer({ min: 0, max: maxIndex }),
         fc.constantFrom(/** @type {const} */ ("comment"), "hidden"),
       )
       .map(([a, b, kind]) => ({
@@ -67,7 +68,7 @@ describe("property: spliceRanges preserves bytes outside the ranges", () => {
     fc.assert(
       fc.property(
         safeText.chain((text) =>
-          fc.tuple(fc.constant(text), rangesFor(text.length)),
+          fc.tuple(fc.constant(text), rangesUpTo(text.length)),
         ),
         ([text, ranges]) => {
           const out = spliceRanges(text, ranges);
@@ -91,23 +92,7 @@ describe("property: spliceRanges preserves bytes outside the ranges", () => {
     fc.assert(
       fc.property(
         safeText.chain((text) =>
-          fc.tuple(
-            fc.constant(text),
-            fc.array(
-              fc
-                .tuple(
-                  fc.integer({ min: 0, max: text.length + 10 }),
-                  fc.integer({ min: 0, max: text.length + 10 }),
-                  fc.constantFrom(/** @type {const} */ ("comment"), "hidden"),
-                )
-                .map(([a, b, kind]) => ({
-                  start: Math.min(a, b),
-                  end: Math.max(a, b),
-                  kind,
-                })),
-              { maxLength: 6 },
-            ),
-          ),
+          fc.tuple(fc.constant(text), rangesUpTo(text.length + 10)),
         ),
         ([text, ranges]) => {
           assert.equal(typeof spliceRanges(text, ranges), "string");
