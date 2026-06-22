@@ -23,12 +23,16 @@ import os from "node:os";
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
 }).trim();
-const srcUrl = (file) =>
-  new URL(`../src/${file}`, import.meta.url).href.replace(/"/g, '\\"');
+const srcUrl = (file) => new URL(`../src/${file}`, import.meta.url).href;
 
-// The heavy graph that the Layer-1 path must never trigger: the lazy `html.mjs`
-// module itself and every dependency only it pulls in.
-const HEAVY = /(?:\/html\.mjs$)|remark|rehype|unified|unist|style-to-object/;
+// What the Layer-1 root path must never trigger. The root re-exports only the
+// zero-dependency `invisible.mjs` and `gates.mjs`, so its graph is expected to
+// be dependency-free: ANY `node_modules` resolution is a leak, robust to future
+// dependency renames (a brittle package-name allowlist would miss a heavy
+// transitive copied straight into the root). The `html.mjs` arm names the one
+// module that bridges the root to the heavy graph, for a clearer failure.
+const LEAKED = (url) =>
+  url.includes("/node_modules/") || /\/html\.mjs$/.test(url);
 
 // Run `import(entryUrl)` in a fresh process under a resolve hook that appends
 // every resolved module URL to `outPath`. The hook runs off-thread, but module
@@ -55,13 +59,13 @@ function resolvedGraph(entryUrl) {
     "  parentURL: import.meta.url,",
     `  data: { outPath: ${JSON.stringify(outPath)} },`,
     "});",
-    `await import("${entryUrl}");`,
+    `await import(${JSON.stringify(entryUrl)});`,
   ].join("\n");
-  execFileSync(process.execPath, ["--input-type=module", "-e", runner], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  });
   try {
+    execFileSync(process.execPath, ["--input-type=module", "-e", runner], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
     return readFileSync(outPath, "utf8").split("\n").filter(Boolean);
   } finally {
     rmSync(outPath, { force: true });
@@ -81,7 +85,7 @@ describe("lazy-load invariant", () => {
       graph.some((url) => url.endsWith("/gates.mjs")),
       "root did not load gates.mjs — pre-gate re-export path changed",
     );
-    const leaked = graph.filter((url) => HEAVY.test(url));
+    const leaked = graph.filter(LEAKED);
     assert.deepEqual(
       leaked,
       [],
@@ -89,11 +93,11 @@ describe("lazy-load invariant", () => {
     );
   });
 
-  it("importing the HTML subpath DOES load the remark graph (negative test is not vacuous)", () => {
+  it("importing the HTML subpath DOES load the heavy graph (negative test is not vacuous)", () => {
     const graph = resolvedGraph(srcUrl("html.mjs"));
     assert.ok(
-      graph.some((url) => HEAVY.test(url)),
-      "html.mjs loaded none of the heavy deps — the leak detector can never fire, so the root test would pass vacuously",
+      graph.some(LEAKED),
+      "html.mjs loaded nothing LEAKED flags — the detector can never fire, so the root test would pass vacuously",
     );
   });
 });
