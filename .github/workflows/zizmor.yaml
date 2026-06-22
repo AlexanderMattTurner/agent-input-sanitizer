@@ -7,7 +7,7 @@ on:
     branches: ["main"]
     paths:
       - ".github/**"
-  pull_request:
+  pull_request: # not-required-check
     paths:
       - ".github/**"
 

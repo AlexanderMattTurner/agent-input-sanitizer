@@ -17,7 +17,7 @@ on:
       - ".pre-commit-config.yaml"
       - ".github/scripts/run-hook-lifecycle.sh"
       - ".github/workflows/hook-lifecycle.yaml"
-  pull_request:
+  pull_request: # not-required-check
     paths:
       - ".claude/hooks/**"
       - ".hooks/**"
