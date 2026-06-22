@@ -144,6 +144,27 @@ without a test fails. Property and fuzz tests (fast-check) exercise idempotence,
 deletion-only output, never-throwing on lone surrogates / astral input, and the
 `found` ⇔ changed invariant over the real Unicode input domain.
 
+## Prior work
+
+A few tools tackle adjacent problems. [`llm-sanitizer`](https://pypi.org/project/llm-sanitizer/)
+(Python) is the closest: it scans untrusted documents for hidden instructions
+across the same surfaces—zero-width Unicode, hidden HTML, exfil—but it
+_heuristically flags_ suspicious patterns (“ignore previous instructions,”
+roleplay phrases, base64, homoglyphs) and emits risk-scored reports.
+[llmsanitizer.com](https://llmsanitizer.com/) is a hosted proxy focused on the
+outbound prompt: prompt-injection blocking, PII redaction, and jailbreak
+detection. In npm, [`sanitize-html`](https://www.npmjs.com/package/sanitize-html)
+strips comments and scripts but misses CSS-hidden elements and re-serializes
+(reflowing links, code, and tables), and the common invisible-character
+strippers blanket-delete zero-width joiners, corrupting Indic scripts and emoji.
+
+This library is deliberately narrower and deterministic. It does not guess at
+intent, score risk, or redact PII; it neutralizes exactly the bytes a human
+cannot see—preserving every other byte verbatim, keeping ZWNJ/ZWJ where an
+orthography requires them, and sweeping ANSI escapes none of the above touch.
+Use it as the byte-level cleaning step _before_ any heuristic or model-based
+defense, not as a replacement for them.
+
 ## License
 
 [Apache-2.0](./LICENSE)
