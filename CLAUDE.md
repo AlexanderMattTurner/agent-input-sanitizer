@@ -32,6 +32,10 @@ Use the `/pr-creation` skill. For contributions to others’ repos, before writi
 
 **Lessons only reach the template repo if they appear in the PR description**—lessons mentioned only in chat are never propagated by `phone-home.yaml` and are permanently lost.
 
+## Changelog
+
+**Every PR adds a `changelog.d/<id>.<category>.md` fragment**—no exceptions for “internal churn” (this overrides the carve-out in `changelog.d/README.md`). Use the PR number as `<id>`; pick the [Keep a Changelog](https://keepachangelog.com/) `<category>` (`added`/`changed`/`deprecated`/`removed`/`fixed`/`security`) that fits, defaulting to `fixed` when nothing else does. **Never** hand-edit `CHANGELOG.md` or bump `package.json`—the `release`-label workflow (`release-prep.yaml`) assembles fragments and bumps the version.
+
 ## Code Style
 
 - Fail loudly: throw errors over silent warnings; never remove error output unless the user explicitly asks
