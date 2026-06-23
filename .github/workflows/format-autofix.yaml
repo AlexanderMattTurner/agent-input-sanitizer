@@ -1,0 +1,62 @@
+name: Format autofix
+
+# Auto-apply Prettier to PR branches and push the fix, so a formatting slip is
+# corrected in place instead of just failing the Required "Format check". The
+# pushed commit re-triggers format-check (see the token note below), which then
+# passes on the fixed commit.
+on:
+  pull_request:
+
+concurrency:
+  group: format-autofix-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  autofix:
+    # Same-repo PRs only — a token cannot push to a fork's branch — and never on
+    # bot-authored PRs: bots (dependabot, etc.) manage their own commits, and
+    # claude-code-action rejects bot actors, so autofixing them just burns CI.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Autofix is useless without a PAT/App token: a GITHUB_TOKEN push does not
+      # re-trigger workflows, so the Required format-check would stay pending on
+      # the fixed commit and block the PR. So gate the real work on the secret
+      # being present. `secrets` can't be read in a job-level `if`, hence this
+      # preflight step that exposes it as a step output; when it's absent every
+      # later step is skipped and the job ends green (a no-op), instead of the
+      # checkout failing on an empty token.
+      - name: Check for AUTOFIX_TOKEN
+        id: guard
+        env:
+          AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
+        run: |
+          if [ -n "$AUTOFIX_TOKEN" ]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::AUTOFIX_TOKEN secret is not set; skipping autofix. Add a fine-grained PAT (contents: write) so the fix-commit re-triggers format-check."
+          fi
+
+      - if: steps.guard.outputs.enabled == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          # PAT/App token, NOT GITHUB_TOKEN, so the push re-triggers format-check.
+          token: ${{ secrets.AUTOFIX_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Setup base environment
+        if: steps.guard.outputs.enabled == 'true'
+        uses: ./.github/actions/setup-base-env
+
+      - name: Apply Prettier and push any fixes
+        if: steps.guard.outputs.enabled == 'true' && hashFiles('package.json') != ''
+        run: bash .github/scripts/format-autofix.sh

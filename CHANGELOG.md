@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to
 adhere to [Semantic Versioning](https://semver.org/).
 
-<!-- Record user-facing changes under the "## Unreleased" heading below, using Keep a Changelog headings (### Added, ### Changed, ### Deprecated, ### Removed, ### Fixed, ### Security). On push to main the auto-version workflow promotes the Unreleased block to a dated version section; leave it empty when there is nothing user-facing. -->
+<!-- Do NOT hand-edit this file. On push to main the auto-version workflow drafts the next release's notes from the Conventional Commit subjects since the last tag, then promotes "## Unreleased" to a dated version section. Your commit messages are the source of truth — keep the empty "## Unreleased" heading below in place. -->
 
 ## Unreleased
 
