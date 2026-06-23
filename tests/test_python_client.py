@@ -55,6 +55,10 @@ def test_clean_text_passes_through_unchanged() -> None:
     assert result == SanitizeResult(cleaned="hello world", found=[], warnings=[])
 
 
+def test_empty_input() -> None:
+    assert sanitize("") == SanitizeResult(cleaned="", found=[], warnings=[])
+
+
 def test_html_flag_reaches_layer2() -> None:
     assert "leak" in sanitize(HIDDEN_HTML, html=False).cleaned  # Layer 1 only
     assert "leak" not in sanitize(HIDDEN_HTML, html=True).cleaned  # hidden removed
@@ -70,6 +74,22 @@ def test_html_amortizes_load_via_shared_worker() -> None:
     assert ais._worker is worker  # same process reused, not respawned
     assert "leak" not in first.cleaned
     assert second.cleaned == "ab"
+
+
+def test_shared_worker_self_heals_after_death() -> None:
+    # The riskiest path: a dead shared worker must be reaped and respawned, not
+    # left wedging every later persistent call on a corpse.
+    sanitize(HIDDEN_HTML, html=True)
+    dead = ais._worker
+    assert dead is not None
+    dead._proc.kill()
+    dead._proc.wait()
+    assert not dead.is_alive()
+
+    result = sanitize(f"a{ZERO_WIDTH_SPACE}b", html=True, persist=True)
+    assert ais._worker is not None and ais._worker.is_alive()
+    assert ais._worker is not dead  # a fresh process, not the corpse
+    assert result.cleaned == "ab"
 
 
 def test_layer1_default_stays_oneshot() -> None:

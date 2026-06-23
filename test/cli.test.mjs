@@ -21,12 +21,16 @@ const CLI = fileURLToPath(new URL("../bin/sanitize-cli.mjs", import.meta.url));
 const run = (args, input) =>
   execFileSync("node", [CLI, ...args], { input, encoding: "utf8" });
 
+/** The wire response shape, for comparing CLI output against the sanitize oracle. */
+const envelope = ({ cleaned, found, warnings }) => ({ cleaned, found, warnings });
+
 // Inputs spanning every layer: a Cf char (Layer 1), clean passthrough, a hidden
 // element + an exfil-shaped URL (Layers 2/3, html mode). Each carries the html
 // flag it needs so the oracle comparison covers both code paths.
 const CASES = [
   { name: "strips invisible (Layer 1)", text: "a​b", html: false },
   { name: "clean passthrough", text: "hello world", html: false },
+  { name: "empty input", text: "", html: false },
   {
     name: "hidden HTML + exfil (Layers 2/3)",
     text: '<div style="display:none">leak</div>[x](https://evil.test/?d=SECRET)',
@@ -39,11 +43,7 @@ describe("CLI: one-shot mode mirrors sanitize()", () => {
     it(name, async () => {
       const expected = await sanitize(text, { html });
       const got = JSON.parse(run([], JSON.stringify({ text, html })));
-      assert.deepEqual(got, {
-        cleaned: expected.cleaned,
-        found: expected.found,
-        warnings: expected.warnings,
-      });
+      assert.deepEqual(got, envelope(expected));
     });
   }
 });
@@ -56,12 +56,7 @@ describe("CLI: worker mode", () => {
     const lines = run(["--worker"], `${input}\n`).trim().split("\n");
     assert.equal(lines.length, CASES.length);
     for (const [i, { text, html }] of CASES.entries()) {
-      const expected = await sanitize(text, { html });
-      assert.deepEqual(JSON.parse(lines[i]), {
-        cleaned: expected.cleaned,
-        found: expected.found,
-        warnings: expected.warnings,
-      });
+      assert.deepEqual(JSON.parse(lines[i]), envelope(await sanitize(text, { html })));
     }
   });
 
@@ -78,14 +73,9 @@ describe("CLI: worker mode", () => {
 
   it("treats a string-encoded newline in the payload as one request", async () => {
     const text = "line1\nline2​";
-    const expected = await sanitize(text);
     const out = run(["--worker"], `${JSON.stringify({ text })}\n`).trim();
     assert.equal(out.split("\n").length, 1);
-    assert.deepEqual(JSON.parse(out), {
-      cleaned: expected.cleaned,
-      found: expected.found,
-      warnings: expected.warnings,
-    });
+    assert.deepEqual(JSON.parse(out), envelope(await sanitize(text)));
   });
 });
 
@@ -96,6 +86,16 @@ describe("CLI: one-shot fails loudly on a bad request", () => {
       (err) => {
         assert.equal(err.status, 1);
         assert.match(String(err.stderr), /text must be a string/);
+        return true;
+      },
+    );
+  });
+
+  it("exits non-zero on empty stdin (no request at all)", () => {
+    assert.throws(
+      () => run([], ""),
+      (err) => {
+        assert.equal(err.status, 1);
         return true;
       },
     );

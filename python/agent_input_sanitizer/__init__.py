@@ -23,6 +23,7 @@ Entry points:
 import atexit
 import json
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,6 +56,11 @@ def _node_missing(node: str) -> RuntimeError:
         "agent-input-sanitizer keeps a single JavaScript source of truth and "
         "has no pure-Python fallback; install Node to use the Python client."
     )
+
+
+def _encode_request(text: str, html: bool) -> str:
+    """The on-wire request envelope, single-sourced for both call paths."""
+    return json.dumps({"text": text, "html": html})
 
 
 def _parse_response(line: str) -> SanitizeResult:
@@ -94,11 +100,10 @@ def sanitize(
         with _shared_worker_lock:
             return _shared_worker(node).sanitize(text, html=html)
 
-    request = json.dumps({"text": text, "html": html})
     try:
         proc = subprocess.run(
             [node, str(_CLI)],
-            input=request,
+            input=_encode_request(text, html),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -127,21 +132,32 @@ class Sanitizer:
     def __init__(self, node: str = "node") -> None:
         self._node = node
         self._proc: subprocess.Popen | None = None
+        # Worker stderr goes to a temp file, never a pipe: nobody drains stderr
+        # between requests, so a pipe could fill (Node warnings, etc.) and block
+        # the worker mid-response, deadlocking the readline below. A file never
+        # blocks, and we still read it back for diagnostics if the worker dies.
+        self._stderr: tempfile.SpooledTemporaryFile | None = None
 
-    def __enter__(self) -> "Sanitizer":
+    def start(self) -> "Sanitizer":
+        self._stderr = tempfile.SpooledTemporaryFile(mode="w+", encoding="utf-8")
         try:
             self._proc = subprocess.Popen(
                 [self._node, str(_CLI), "--worker"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=self._stderr,
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
             )
         except FileNotFoundError as cause:
+            self._stderr.close()
+            self._stderr = None
             raise _node_missing(self._node) from cause
         return self
+
+    def __enter__(self) -> "Sanitizer":
+        return self.start()
 
     def __exit__(self, *exc: object) -> None:
         self.close()
@@ -153,21 +169,37 @@ class Sanitizer:
         if self._proc is None or self._proc.poll() is not None:
             raise RuntimeError("worker is not running (use it as a context manager)")
         assert self._proc.stdin is not None and self._proc.stdout is not None
-        self._proc.stdin.write(json.dumps({"text": text, "html": html}) + "\n")
+        self._proc.stdin.write(_encode_request(text, html) + "\n")
         self._proc.stdin.flush()
         line = self._proc.stdout.readline()
         if line == "":
-            stderr = self._proc.stderr.read() if self._proc.stderr else ""
-            raise RuntimeError(f"sanitize worker exited unexpectedly: {stderr.strip()}")
+            raise RuntimeError(
+                f"sanitize worker exited unexpectedly: {self._drain_stderr()}"
+            )
         return _parse_response(line)
+
+    def _drain_stderr(self) -> str:
+        if self._stderr is None:
+            return ""
+        self._stderr.seek(0)
+        return self._stderr.read().strip()
 
     def close(self) -> None:
         if self._proc is None:
             return
         if self._proc.stdin is not None:
             self._proc.stdin.close()
-        self._proc.wait(timeout=5)
+        try:
+            self._proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+        if self._proc.stdout is not None:
+            self._proc.stdout.close()
         self._proc = None
+        if self._stderr is not None:
+            self._stderr.close()
+            self._stderr = None
 
 
 # Process-wide worker backing the persistent path of `sanitize`. The lock is
@@ -188,9 +220,10 @@ def _shared_worker(node: str) -> Sanitizer:
     """
     global _worker, _atexit_registered
     if _worker is not None and not _worker.is_alive():
+        _worker.close()  # reap the corpse's pipes/temp file before replacing it
         _worker = None
     if _worker is None:
-        _worker = Sanitizer(node=node).__enter__()
+        _worker = Sanitizer(node=node).start()
         if not _atexit_registered:
             atexit.register(shutdown_worker)
             _atexit_registered = True
