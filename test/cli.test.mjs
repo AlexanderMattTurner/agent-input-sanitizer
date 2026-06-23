@@ -12,10 +12,21 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import fc from "fast-check";
 
 import { sanitize } from "../src/index.mjs";
+import { classifyPrompt } from "../src/prompt.mjs";
+import { sanitizeText } from "../src/output.mjs";
+import { scanInstructionFiles } from "../src/instructions.mjs";
 import { fcRunOptions } from "./test-helpers.mjs";
+
+const ESC = "\u001b";
+
+const ZWS = "\u200b";
+const HIDDEN_HTML = '<div style="display:none">leak</div>';
 
 const CLI = fileURLToPath(new URL("../bin/sanitize-cli.mjs", import.meta.url));
 
@@ -199,5 +210,100 @@ describe("CLI: large input", () => {
     const out = run(["--worker"], `${JSON.stringify({ text })}\n`).trim();
     assert.equal(out.split("\n").length, 1);
     assert.deepEqual(JSON.parse(out), expected);
+  });
+});
+
+// \u2500\u2500\u2500 Op dispatch: the other self-contained entry points \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+//
+// Beyond `sanitize`, the CLI bridges every data-in/data-out entry point through
+// an `op` field. Same contract as above \u2014 the in-process function is the oracle,
+// and these pin only that the CLI relays its result faithfully in both modes.
+// The injected-callback seams (confusables, redact, io) have no wire form and are
+// deliberately absent.
+
+/** Build one request line and assert the CLI's response equals `expected`, in
+ * both one-shot and (single-request) worker mode. */
+const assertOpMirrors = (request, expected) => {
+  const line = JSON.stringify(request);
+  assert.deepEqual(JSON.parse(run([], line)), expected);
+  const out = run(["--worker"], `${line}\n`).trim();
+  assert.equal(out.split("\n").length, 1);
+  assert.deepEqual(JSON.parse(out), expected);
+};
+
+describe("CLI: op dispatch mirrors the in-process entry point", () => {
+  it("classifyPrompt: pass / SGR-note / block all relay faithfully", () => {
+    for (const text of [
+      "hello world",
+      `${ESC}[31mred${ESC}[0m`,
+      `${ESC}[2Jwipe`,
+    ])
+      assertOpMirrors({ op: "classifyPrompt", text }, classifyPrompt(text));
+  });
+
+  it("sanitizeText: Layers 1\u20133 relay the full shape", async () => {
+    for (const { text, html } of [
+      { text: `a${ZWS}b`, html: false },
+      { text: "hello", html: false },
+      { text: HIDDEN_HTML, html: true },
+    ]) {
+      const { cleaned, warnings, modified, sgrNote } = await sanitizeText(
+        text,
+        {
+          html,
+        },
+      );
+      assertOpMirrors(
+        { op: "sanitizeText", text, html },
+        { cleaned, warnings, modified, sgrNote },
+      );
+    }
+  });
+
+  it("scanInstructionFiles + cleanFile: scan, clean, re-scan clean", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "ais-cli-"));
+    const notes = path.join(dir, "NOTES.md");
+    writeFileSync(notes, `intro ${ZWS.repeat(100)} outro\n`, "utf8");
+    writeFileSync(path.join(dir, "CLEAN.md"), "nothing hidden\n", "utf8");
+
+    assertOpMirrors(
+      { op: "scanInstructionFiles", globs: ["*.md"], cwd: dir },
+      { findings: scanInstructionFiles(["*.md"], { cwd: dir }) },
+    );
+
+    // cleanFile mutates the file, so the oracle can't run on the same path after
+    // the CLI already cleaned it. Drive the CLI first, then assert the on-disk
+    // effect and that a second clean is a no-op.
+    const clean = (p) =>
+      JSON.parse(run([], JSON.stringify({ op: "cleanFile", path: p }))).changed;
+    assert.equal(clean(notes), true);
+    assert.ok(!readFileSync(notes, "utf8").includes(ZWS));
+    assert.equal(clean(notes), false);
+    assert.equal(clean(path.join(dir, "CLEAN.md")), false);
+    assert.deepEqual(scanInstructionFiles(["*.md"], { cwd: dir }), []);
+  });
+});
+
+describe("CLI: unknown op fails loudly", () => {
+  it("one-shot exits non-zero naming the op", () => {
+    assert.throws(
+      () => run([], JSON.stringify({ op: "nope", text: "x" })),
+      (err) => {
+        assert.equal(err.status, 1);
+        assert.match(String(err.stderr), /unknown op: nope/);
+        return true;
+      },
+    );
+  });
+
+  it("worker reports the bad op and keeps serving", () => {
+    const input = `${JSON.stringify({ op: "nope" })}\n${JSON.stringify({ text: "ok" })}\n`;
+    const lines = run(["--worker"], input).trim().split("\n");
+    assert.match(JSON.parse(lines[0]).error, /unknown op: nope/);
+    assert.deepEqual(JSON.parse(lines[1]), {
+      cleaned: "ok",
+      found: [],
+      warnings: [],
+    });
   });
 });

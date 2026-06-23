@@ -158,13 +158,16 @@ const repaired = await rehydrateRedacted("Edit", toolInput, {
 
 The JS is the **single source of truth**; non-JS callers drive the same
 verdicts through the bundled CLI (JSON over stdin/stdout, Node ≥20 on `PATH`)
-—no second implementation to drift. The CLI exposes the data-in/data-out core
-(`sanitize`, Layers 1–3); the agent-pipeline entry points take **injected** JS
-seams (homoglyph scanner, redactor, file access) that have no language-agnostic
-wire form, so call those from JS.
+—no second implementation to drift. The CLI bridges every self-contained
+entry point via an `op` field (default `"sanitize"`): `sanitizeText` (Layers
+1–3), `classifyPrompt`, `scanInstructionFiles`, and `cleanFile`. The
+agent-pipeline seams that take an **injected** JS callback (homoglyph scanner,
+redactor, file access) have no language-agnostic wire form, so call those from
+JS.
 
 ```sh
-echo '{"text":"a​b","html":false}' | npx sanitize-cli  # one request → one response
+echo '{"text":"a​b","html":false}' | npx sanitize-cli  # default op: sanitize
+echo '{"op":"classifyPrompt","text":"…"}' | npx sanitize-cli  # pass/note/block
 sanitize-cli --worker                                   # newline-delimited, one response/line
 ```
 
@@ -183,3 +186,6 @@ sanitize(page_source, html=True)  # HTML layers, warm worker reused
 with Sanitizer() as s:            # own the worker’s lifetime
     s.sanitize(page, html=True)
 ```
+
+The other self-contained entry points are wrapped too:
+`sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`.

@@ -22,11 +22,19 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 import agent_input_sanitizer as ais  # noqa: E402
 from agent_input_sanitizer import (  # noqa: E402
+    PromptVerdict,
     Sanitizer,
     SanitizeResult,
+    TextResult,
+    classify_prompt,
+    clean_file,
     sanitize,
+    sanitize_text,
+    scan_instruction_files,
     shutdown_worker,
 )
+
+ESC = "\x1b"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="Node.js required for the CLI bridge"
@@ -202,3 +210,62 @@ def test_shared_worker_not_shared_across_fork() -> None:
     # The "inherited" worker was abandoned, not reaped — still running.
     assert inherited.is_alive()
     inherited.close()
+
+
+# ─── Additional self-contained entry points (op dispatch) ────────────────────
+
+
+def test_classify_prompt_pass() -> None:
+    assert classify_prompt("hello world") == PromptVerdict(action="pass")
+
+
+def test_classify_prompt_note_on_sgr_only() -> None:
+    # A purely cosmetic color sequence is usable: note, not block.
+    assert classify_prompt(f"{ESC}[31mred{ESC}[0m") == PromptVerdict(action="note")
+
+
+def test_classify_prompt_block_carries_reason() -> None:
+    verdict = classify_prompt(f"{ESC}[2Jwipe")  # non-SGR escape → block
+    assert verdict.action == "block"
+    assert verdict.reason
+
+
+def test_sanitize_text_layer1() -> None:
+    result = sanitize_text(f"a{ZERO_WIDTH_SPACE}b")
+    assert result == TextResult(
+        cleaned="ab",
+        warnings=result.warnings,  # exact text owned by JS suite
+        modified=True,
+        sgr_note=False,
+    )
+    assert result.warnings
+
+
+def test_sanitize_text_clean_passthrough() -> None:
+    assert sanitize_text("hello") == TextResult(
+        cleaned="hello", warnings=[], modified=False, sgr_note=False
+    )
+
+
+def test_sanitize_text_html_layer() -> None:
+    assert "leak" not in sanitize_text(HIDDEN_HTML, html=True).cleaned
+
+
+def test_scan_and_clean_instruction_files(tmp_path: Path) -> None:
+    payload = f"intro {ZERO_WIDTH_SPACE * 100} outro\n"
+    (tmp_path / "NOTES.md").write_text(payload, encoding="utf-8")
+    (tmp_path / "CLEAN.md").write_text("nothing hidden here\n", encoding="utf-8")
+
+    findings = scan_instruction_files(["*.md"], cwd=str(tmp_path))
+    assert [f.file for f in findings] == ["NOTES.md"]
+    assert findings[0].findings  # non-empty hidden-Unicode hits
+
+    assert clean_file(str(tmp_path / "NOTES.md")) is True
+    assert clean_file(str(tmp_path / "NOTES.md")) is False  # already clean now
+    assert clean_file(str(tmp_path / "CLEAN.md")) is False
+    assert scan_instruction_files(["*.md"], cwd=str(tmp_path)) == []
+
+
+def test_sanitize_text_uses_shared_worker_for_html() -> None:
+    sanitize_text(HIDDEN_HTML, html=True)
+    assert ais._worker is not None and ais._worker.is_alive()

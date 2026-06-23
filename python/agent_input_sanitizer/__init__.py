@@ -7,15 +7,20 @@ without a second implementation to keep in sync. It requires Node.js (>=20) on
 ``PATH``; there is deliberately no pure-Python fallback, because a port is
 exactly the drift this design avoids.
 
+Only the CLI's data-in/data-out entry points are wrapped; the agent-pipeline
+seams that take an injected JS callback (homoglyph scanner, redactor, file
+access) have no language-agnostic wire form and stay JS-only.
+
 Entry points:
 
-* :func:`sanitize` — the one call most callers need. By default it pays the
+* :func:`sanitize` / :func:`sanitize_text` — clean text. The first pays the
   heavy ~200 ms HTML module-load only ONCE: the first ``html=True`` call spins
-  up a shared, process-wide worker and every later ``html=True`` call reuses it
-  (Layer-1-only calls stay one-shot, so a caller that never touches HTML never
-  leaves a process running). Override with ``persist=True``/``False``.
-* :class:`Sanitizer` — an explicitly-scoped long-lived worker, for callers that
-  want to own the process lifetime via a context manager.
+  up a shared, process-wide worker that later ``html=True`` calls reuse (Layer-1
+  calls stay one-shot, leaving no process behind). Override with ``persist``.
+* :func:`classify_prompt` — pass / note / block verdict for a user prompt.
+* :func:`scan_instruction_files` / :func:`clean_file` — scan or strip
+  hidden-Unicode payloads from instruction files (`CLAUDE.md`, `AGENTS.md`, …).
+* :class:`Sanitizer` — an explicitly-scoped long-lived worker (context manager).
 * :func:`shutdown_worker` — tear down the shared worker eagerly (it is also torn
   down at interpreter exit).
 """
@@ -34,7 +39,19 @@ from pathlib import Path
 # parents up.
 _CLI = Path(__file__).resolve().parents[2] / "bin" / "sanitize-cli.mjs"
 
-__all__ = ["SanitizeResult", "sanitize", "Sanitizer", "shutdown_worker"]
+__all__ = [
+    "SanitizeResult",
+    "TextResult",
+    "PromptVerdict",
+    "InstructionFinding",
+    "sanitize",
+    "sanitize_text",
+    "classify_prompt",
+    "scan_instruction_files",
+    "clean_file",
+    "Sanitizer",
+    "shutdown_worker",
+]
 
 
 @dataclass(frozen=True)
@@ -49,6 +66,33 @@ class SanitizeResult:
     cleaned: str
     found: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TextResult:
+    """The :func:`sanitize_text` return shape (Layers 1–3 of the output pipeline)."""
+
+    cleaned: str
+    warnings: list[str]
+    modified: bool
+    sgr_note: bool
+
+
+@dataclass(frozen=True)
+class PromptVerdict:
+    """The :func:`classify_prompt` verdict: ``action`` is pass / note / block."""
+
+    action: str
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class InstructionFinding:
+    """One :func:`scan_instruction_files` hit: a file and its hidden-Unicode
+    findings (each ``{line, charCount, method, decoded}``, mirroring the JS)."""
+
+    file: str
+    findings: list[dict]
 
 
 def _node_missing(node: str) -> RuntimeError:
@@ -74,16 +118,40 @@ def _require_cli() -> None:
         )
 
 
-def _encode_request(text: str, html: bool) -> str:
-    """The on-wire request envelope, single-sourced for both call paths."""
-    return json.dumps({"text": text, "html": html})
-
-
-def _parse_response(line: str) -> SanitizeResult:
-    response = json.loads(line)
+def _check(response: dict) -> dict:
+    """Raise on an ``{error}`` response, else return the payload dict."""
     if "error" in response:
         raise RuntimeError(f"sanitize CLI error: {response['error']}")
-    return SanitizeResult(**response)
+    return response
+
+
+def _oneshot(request: dict, node: str) -> dict:
+    """One request through a fresh CLI subprocess; returns the response payload."""
+    _require_cli()
+    try:
+        proc = subprocess.run(
+            [node, str(_CLI)],
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except FileNotFoundError as cause:
+        raise _node_missing(node) from cause
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"sanitize CLI failed (exit {proc.returncode}): {proc.stderr.strip()}"
+        )
+    return _check(json.loads(proc.stdout))
+
+
+def _dispatch(request: dict, *, persist: bool, node: str) -> dict:
+    """Route a request through the shared worker (persist) or a one-shot call."""
+    if persist:
+        _require_cli()
+        with _shared_worker_lock:
+            return _shared_worker(node).request(request)
+    return _oneshot(request, node)
 
 
 def sanitize(
@@ -101,28 +169,69 @@ def sanitize(
     force the worker or a fresh one-shot subprocess. ``node`` overrides the
     executable, honored only when starting a fresh process.
     """
-    _require_cli()
     if persist is None:
         persist = html
-    if persist:
-        with _shared_worker_lock:
-            return _shared_worker(node).sanitize(text, html=html)
+    resp = _dispatch({"text": text, "html": html}, persist=persist, node=node)
+    return SanitizeResult(**resp)
 
-    try:
-        proc = subprocess.run(
-            [node, str(_CLI)],
-            input=_encode_request(text, html),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-    except FileNotFoundError as cause:
-        raise _node_missing(node) from cause
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"sanitize CLI failed (exit {proc.returncode}): {proc.stderr.strip()}"
-        )
-    return _parse_response(proc.stdout)
+
+def sanitize_text(
+    text: str,
+    *,
+    html: bool = False,
+    exfil_scan: bool = False,
+    persist: bool | None = None,
+    node: str = "node",
+) -> TextResult:
+    """Run the output pipeline's Layers 1–3 over ``text``.
+
+    Layer 4 (secret redaction) and Layer 5 (semantic filter) are injected JS
+    callbacks with no wire form, so they are never run here — use the JS
+    ``sanitizeText`` directly when you need them. ``persist`` behaves as in
+    :func:`sanitize` (defaults to persisting exactly when ``html=True``).
+    """
+    if persist is None:
+        persist = html
+    resp = _dispatch(
+        {"op": "sanitizeText", "text": text, "html": html, "exfilScan": exfil_scan},
+        persist=persist,
+        node=node,
+    )
+    return TextResult(
+        cleaned=resp["cleaned"],
+        warnings=resp["warnings"],
+        modified=resp["modified"],
+        sgr_note=resp["sgrNote"],
+    )
+
+
+def classify_prompt(prompt: str, *, node: str = "node") -> PromptVerdict:
+    """Classify a user ``prompt`` as pass / note / block on invisible/ANSI content."""
+    resp = _oneshot({"op": "classifyPrompt", "text": prompt}, node)
+    return PromptVerdict(action=resp["action"], reason=resp.get("reason"))
+
+
+def scan_instruction_files(
+    globs: list[str], *, cwd: str | None = None, node: str = "node"
+) -> list[InstructionFinding]:
+    """Scan instruction files matched by ``globs`` for hidden-Unicode payloads.
+
+    Returns only files with findings, each path relative to ``cwd`` (default: the
+    CLI process's working directory).
+    """
+    request: dict = {"op": "scanInstructionFiles", "globs": list(globs)}
+    if cwd is not None:
+        request["cwd"] = str(cwd)
+    resp = _oneshot(request, node)
+    return [
+        InstructionFinding(file=f["file"], findings=f["findings"])
+        for f in resp["findings"]
+    ]
+
+
+def clean_file(path: str, *, node: str = "node") -> bool:
+    """Strip payload-capable invisibles from ``path`` in place. True if it changed."""
+    return _oneshot({"op": "cleanFile", "path": str(path)}, node)["changed"]
 
 
 class Sanitizer:
@@ -178,11 +287,12 @@ class Sanitizer:
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def sanitize(self, text: str, *, html: bool = False) -> SanitizeResult:
+    def request(self, payload: dict) -> dict:
+        """Send one request object, return its response payload (raises on error)."""
         if self._proc is None or self._proc.poll() is not None:
             raise RuntimeError("worker is not running (use it as a context manager)")
         assert self._proc.stdin is not None and self._proc.stdout is not None
-        self._proc.stdin.write(_encode_request(text, html) + "\n")
+        self._proc.stdin.write(json.dumps(payload) + "\n")
         self._proc.stdin.flush()
         # Blocking read with no timeout, under _shared_worker_lock for the shared
         # worker: the serialized one-line-per-request protocol can't interleave,
@@ -194,7 +304,10 @@ class Sanitizer:
             raise RuntimeError(
                 f"sanitize worker exited unexpectedly: {self._drain_stderr()}"
             )
-        return _parse_response(line)
+        return _check(json.loads(line))
+
+    def sanitize(self, text: str, *, html: bool = False) -> SanitizeResult:
+        return SanitizeResult(**self.request({"text": text, "html": html}))
 
     def _drain_stderr(self) -> str:
         if self._stderr is None:
