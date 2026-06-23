@@ -74,3 +74,38 @@ const cleaned = sanitizeHtml(pageSource); // null when nothing to strip/report
 const threats = detectExfil(pageSource); // null or [{ isImage, reason, target }]
 const reason = checkExfilUrl(oneUrl); // null or a string reason
 ```
+
+## Non-JS pipelines (Python, etc.)
+
+The sanitization logic has a **single source of truth**: the JavaScript above.
+A Python (or any-language) pipeline drives the _same_ verdicts—no second
+implementation to drift—through the bundled CLI, which speaks JSON over
+stdin/stdout. It requires Node.js (≥20) on `PATH`.
+
+```sh
+# One JSON request in, one JSON response out:
+echo '{"text":"a​b","html":false}' | npx sanitize-cli
+# → {"cleaned":"ab","found":["cf-format"],"warnings":["Stripped: Format chars (Cf)"]}
+
+# Persistent worker: newline-delimited requests, one response line each.
+sanitize-cli --worker
+```
+
+A thin Python client lives in [`python/`](./python). One-shot per call, or a
+long-lived worker (context manager) that pays the HTML module-load once:
+
+```python
+from agent_input_sanitizer import sanitize, Sanitizer
+
+result = sanitize(untrusted_text)                 # Layer 1 only
+result = sanitize(page_source, html=True)         # opt into the HTML layers
+#   result.cleaned / result.found / result.warnings — mirrors the JS return shape
+
+with Sanitizer() as s:                             # hot path: reuse one process
+    for page in pages:
+        s.sanitize(page, html=True)
+```
+
+There is deliberately no pure-Python port: a port _is_ the drift this design
+avoids. Don’t have Node? The client raises a loud error rather than silently
+degrading.
