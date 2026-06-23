@@ -156,55 +156,30 @@ const repaired = await rehydrateRedacted("Edit", toolInput, {
 
 ## Non-JS pipelines (Python, etc.)
 
-The sanitization logic has a **single source of truth**: the JavaScript above.
-A Python (or any-language) pipeline drives the _same_ verdicts—no second
-implementation to drift—through the bundled CLI, which speaks JSON over
-stdin/stdout. It requires Node.js (≥20) on `PATH`.
-
-The CLI bridges the data-in/data-out core—`sanitize` (Layers 1–3). The
-agent-pipeline entry points above (`confusables`, `output`, `rehydrate`, …) take
-**injected** JS seams—a homoglyph scanner, a redactor, file access—so they have
-no language-agnostic wire form and stay JS-only by nature; call them from JS.
+The JS is the **single source of truth**; non-JS callers drive the same
+verdicts through the bundled CLI (JSON over stdin/stdout, Node ≥20 on `PATH`)
+—no second implementation to drift. The CLI exposes the data-in/data-out core
+(`sanitize`, Layers 1–3); the agent-pipeline entry points take **injected** JS
+seams (homoglyph scanner, redactor, file access) that have no language-agnostic
+wire form, so call those from JS.
 
 ```sh
-# One JSON request in, one JSON response out:
-echo '{"text":"a​b","html":false}' | npx sanitize-cli
-# → {"cleaned":"ab","found":["cf-format"],"warnings":["Stripped: Format chars (Cf)"]}
-
-# Persistent worker: newline-delimited requests, one response line each.
-sanitize-cli --worker
+echo '{"text":"a​b","html":false}' | npx sanitize-cli  # one request → one response
+sanitize-cli --worker                                   # newline-delimited, one response/line
 ```
 
-A thin Python client lives in [`python/`](./python). By default it pays the
-heavy ~200 ms HTML module-load **once per process, not per call**: the first
-`html=True` call spins up a shared worker and every later `html=True` call
-reuses it. Layer-1-only calls stay one-shot, so a caller that never touches HTML
-leaves no process running.
+The [`python/`](./python) client wraps both. By default the ~200 ms HTML
+module-load is paid **once per process**: the first `html=True` call starts a
+shared worker that later calls reuse (Layer-1 calls stay one-shot, leaving no
+process behind). `persist=True/False` forces the mode; `shutdown_worker()` (also
+an `atexit` hook) stops it, or scope one with the `Sanitizer` context manager.
+No pure-Python port—a port _is_ the drift this avoids; missing Node fails loudly.
 
 ```python
-from agent_input_sanitizer import sanitize
+from agent_input_sanitizer import sanitize, Sanitizer
 
-result = sanitize(untrusted_text)                 # Layer 1 only (one-shot)
-result = sanitize(page_source, html=True)         # HTML layers — warm worker, reused
-#   result.cleaned / result.found / result.warnings — mirrors the JS return shape
-
-# Force the mode if you need to: persist=True keeps a process warm even for
-# Layer-1 calls; persist=False spawns a fresh subprocess every time.
-sanitize(text, persist=True)
+sanitize(untrusted_text)          # Layer 1, one-shot
+sanitize(page_source, html=True)  # HTML layers, warm worker reused
+with Sanitizer() as s:            # own the worker’s lifetime
+    s.sanitize(page, html=True)
 ```
-
-The shared worker is torn down at interpreter exit; call `shutdown_worker()` to
-stop it sooner. For a worker whose lifetime you own explicitly, use the
-`Sanitizer` context manager:
-
-```python
-from agent_input_sanitizer import Sanitizer
-
-with Sanitizer() as s:
-    for page in pages:
-        s.sanitize(page, html=True)
-```
-
-There is deliberately no pure-Python port: a port _is_ the drift this design
-avoids. Don’t have Node? The client raises a loud error rather than silently
-degrading.
