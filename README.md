@@ -91,17 +91,32 @@ echo '{"text":"a​b","html":false}' | npx sanitize-cli
 sanitize-cli --worker
 ```
 
-A thin Python client lives in [`python/`](./python). One-shot per call, or a
-long-lived worker (context manager) that pays the HTML module-load once:
+A thin Python client lives in [`python/`](./python). By default it pays the
+heavy ~200 ms HTML module-load **once per process, not per call**: the first
+`html=True` call spins up a shared worker and every later `html=True` call
+reuses it. Layer-1-only calls stay one-shot, so a caller that never touches HTML
+leaves no process running.
 
 ```python
-from agent_input_sanitizer import sanitize, Sanitizer
+from agent_input_sanitizer import sanitize
 
-result = sanitize(untrusted_text)                 # Layer 1 only
-result = sanitize(page_source, html=True)         # opt into the HTML layers
+result = sanitize(untrusted_text)                 # Layer 1 only (one-shot)
+result = sanitize(page_source, html=True)         # HTML layers — warm worker, reused
 #   result.cleaned / result.found / result.warnings — mirrors the JS return shape
 
-with Sanitizer() as s:                             # hot path: reuse one process
+# Force the mode if you need to: persist=True keeps a process warm even for
+# Layer-1 calls; persist=False spawns a fresh subprocess every time.
+sanitize(text, persist=True)
+```
+
+The shared worker is torn down at interpreter exit; call `shutdown_worker()` to
+stop it sooner. For a worker whose lifetime you own explicitly, use the
+`Sanitizer` context manager:
+
+```python
+from agent_input_sanitizer import Sanitizer
+
+with Sanitizer() as s:
     for page in pages:
         s.sanitize(page, html=True)
 ```

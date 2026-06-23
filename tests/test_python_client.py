@@ -9,6 +9,7 @@ truth and the client must faithfully relay it.
 
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from agent_input_sanitizer import Sanitizer, SanitizeResult, sanitize  # noqa: E402
+import agent_input_sanitizer as ais  # noqa: E402
+from agent_input_sanitizer import (  # noqa: E402
+    Sanitizer,
+    SanitizeResult,
+    sanitize,
+    shutdown_worker,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="Node.js required for the CLI bridge"
@@ -24,6 +31,16 @@ pytestmark = pytest.mark.skipif(
 
 ZERO_WIDTH_SPACE = "​"
 HIDDEN_HTML = '<div style="display:none">leak</div>'
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_worker_leak() -> Iterator[None]:
+    """Each test starts and ends with no shared worker, so persistence state
+    can't bleed across tests."""
+    shutdown_worker()
+    assert ais._worker is None
+    yield
+    shutdown_worker()
 
 
 def test_strips_invisible_layer1() -> None:
@@ -41,6 +58,44 @@ def test_clean_text_passes_through_unchanged() -> None:
 def test_html_flag_reaches_layer2() -> None:
     assert "leak" in sanitize(HIDDEN_HTML, html=False).cleaned  # Layer 1 only
     assert "leak" not in sanitize(HIDDEN_HTML, html=True).cleaned  # hidden removed
+
+
+def test_html_amortizes_load_via_shared_worker() -> None:
+    # Default persist=None ⇒ html calls reuse one warm worker: the ~200 ms
+    # module-load is paid once, not per call.
+    first = sanitize(HIDDEN_HTML, html=True)
+    worker = ais._worker
+    assert worker is not None and worker.is_alive()
+    second = sanitize(f"a{ZERO_WIDTH_SPACE}b", html=True)
+    assert ais._worker is worker  # same process reused, not respawned
+    assert "leak" not in first.cleaned
+    assert second.cleaned == "ab"
+
+
+def test_layer1_default_stays_oneshot() -> None:
+    # A caller that never touches HTML must not leave a process running.
+    sanitize(f"a{ZERO_WIDTH_SPACE}b")
+    assert ais._worker is None
+
+
+def test_persist_true_forces_worker_for_layer1() -> None:
+    sanitize("plain", persist=True)
+    assert ais._worker is not None and ais._worker.is_alive()
+
+
+def test_persist_false_forces_oneshot_for_html() -> None:
+    result = sanitize(HIDDEN_HTML, html=True, persist=False)
+    assert ais._worker is None
+    assert "leak" not in result.cleaned
+
+
+def test_shutdown_worker_is_idempotent() -> None:
+    sanitize("x", persist=True)
+    assert ais._worker is not None
+    shutdown_worker()
+    assert ais._worker is None
+    shutdown_worker()  # second call is a no-op, not an error
+    assert ais._worker is None
 
 
 def test_worker_matches_oneshot() -> None:

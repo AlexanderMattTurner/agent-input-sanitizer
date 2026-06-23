@@ -7,16 +7,23 @@ without a second implementation to keep in sync. It requires Node.js (>=20) on
 ``PATH``; there is deliberately no pure-Python fallback, because a port is
 exactly the drift this design avoids.
 
-Two entry points, mirroring the CLI's two modes:
+Entry points:
 
-* :func:`sanitize` — one subprocess per call. Simplest; pays process-spawn cost
-  (and ~200 ms HTML module-load when ``html=True``) every time.
-* :class:`Sanitizer` — a long-lived worker process. Amortizes startup across
-  many calls; use it as a context manager on the hot path.
+* :func:`sanitize` — the one call most callers need. By default it pays the
+  heavy ~200 ms HTML module-load only ONCE: the first ``html=True`` call spins
+  up a shared, process-wide worker and every later ``html=True`` call reuses it
+  (Layer-1-only calls stay one-shot, so a caller that never touches HTML never
+  leaves a process running). Override with ``persist=True``/``False``.
+* :class:`Sanitizer` — an explicitly-scoped long-lived worker, for callers that
+  want to own the process lifetime via a context manager.
+* :func:`shutdown_worker` — tear down the shared worker eagerly (it is also torn
+  down at interpreter exit).
 """
 
+import atexit
 import json
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +32,7 @@ from pathlib import Path
 # parents up.
 _CLI = Path(__file__).resolve().parents[2] / "bin" / "sanitize-cli.mjs"
 
-__all__ = ["SanitizeResult", "sanitize", "Sanitizer"]
+__all__ = ["SanitizeResult", "sanitize", "Sanitizer", "shutdown_worker"]
 
 
 @dataclass(frozen=True)
@@ -57,12 +64,36 @@ def _parse_response(line: str) -> SanitizeResult:
     return SanitizeResult(**response)
 
 
-def sanitize(text: str, *, html: bool = False, node: str = "node") -> SanitizeResult:
-    """Sanitize ``text`` via a one-shot CLI subprocess.
+def sanitize(
+    text: str,
+    *,
+    html: bool = False,
+    persist: bool | None = None,
+    node: str = "node",
+) -> SanitizeResult:
+    """Sanitize ``text``.
 
     Set ``html=True`` to run the HTML layers (Layers 2 & 3) in addition to the
-    always-on Layer 1. ``node`` overrides the Node executable.
+    always-on Layer 1.
+
+    ``persist`` selects how the Node process is managed:
+
+    * ``None`` (default) — persist exactly when ``html=True``. HTML's ~200 ms
+      module-load is then paid once for the whole process: the first such call
+      starts the shared worker and the rest reuse it. Layer-1-only calls stay
+      one-shot so a non-HTML caller leaves no process running.
+    * ``True`` — always route through the shared worker.
+    * ``False`` — always spawn a fresh one-shot subprocess.
+
+    ``node`` overrides the Node executable (only honored when starting a fresh
+    process; an already-running shared worker keeps the executable it began with).
     """
+    if persist is None:
+        persist = html
+    if persist:
+        with _shared_worker_lock:
+            return _shared_worker(node).sanitize(text, html=html)
+
     request = json.dumps({"text": text, "html": html})
     try:
         proc = subprocess.run(
@@ -115,6 +146,9 @@ class Sanitizer:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def is_alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
     def sanitize(self, text: str, *, html: bool = False) -> SanitizeResult:
         if self._proc is None or self._proc.poll() is not None:
             raise RuntimeError("worker is not running (use it as a context manager)")
@@ -134,3 +168,40 @@ class Sanitizer:
             self._proc.stdin.close()
         self._proc.wait(timeout=5)
         self._proc = None
+
+
+# Process-wide worker backing the persistent path of `sanitize`. The lock is
+# held across each full request/response so concurrent persistent callers can't
+# interleave writes and reads on the one shared pipe (which would desync the
+# protocol); it also guards spin-up and teardown of `_worker` itself.
+_worker: Sanitizer | None = None
+_shared_worker_lock = threading.Lock()
+_atexit_registered = False
+
+
+def _shared_worker(node: str) -> Sanitizer:
+    """Return the shared worker, starting it on first use. Caller holds the lock.
+
+    A worker found dead (its prior request already raised, so the failure was
+    surfaced loudly) is discarded and replaced, so the persistent path
+    self-heals rather than wedging every later call on a corpse.
+    """
+    global _worker, _atexit_registered
+    if _worker is not None and not _worker.is_alive():
+        _worker = None
+    if _worker is None:
+        _worker = Sanitizer(node=node).__enter__()
+        if not _atexit_registered:
+            atexit.register(shutdown_worker)
+            _atexit_registered = True
+    return _worker
+
+
+def shutdown_worker() -> None:
+    """Tear down the shared persistent worker if one is running. Idempotent."""
+    global _worker
+    with _shared_worker_lock:
+        if _worker is None:
+            return
+        _worker.close()
+        _worker = None
