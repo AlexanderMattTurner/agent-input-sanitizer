@@ -12,6 +12,9 @@
   },
   "homepage": "https://github.com/alexander-turner/agent-input-sanitizer#readme",
   "packageManager": "pnpm@11.8.0",
+  "bin": {
+    "sanitize-cli": "bin/sanitize-cli.mjs"
+  },
   "scripts": {
     "postinstall": "git config core.hooksPath .hooks",
     "test": "c8 node --test",
@@ -132,6 +135,7 @@
   },
   "files": [
     "src",
+    "bin/sanitize-cli.mjs",
     "types",
     "LICENSE",
     "README.md",
