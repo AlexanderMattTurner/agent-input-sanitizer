@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- Annotate `SECRET_HINT` / `SECRET_HINT_EXT` as `RegExp` so their generated
+  declarations no longer infer `any`, which broke `tsc` for consumers importing
+  them under strict `checkJs`.
+
 ## [1.0.1] - 2026-06-22
 
 ### Changed
