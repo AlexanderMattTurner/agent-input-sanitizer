@@ -8,6 +8,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.0.3] - 2026-06-23
+
+### Changed
+
+- ci: drop security-vulnerability-scan workflow
+- ci: run security scan monthly instead of weekly
+- ci: run template-sync weekly instead of daily
+- ci: drop @claude responder, pin security scan to Sonnet
+
 ## [1.0.2] - 2026-06-23
 
 ### Changed
