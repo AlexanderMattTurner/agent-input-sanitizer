@@ -22,7 +22,11 @@ const run = (args, input) =>
   execFileSync("node", [CLI, ...args], { input, encoding: "utf8" });
 
 /** The wire response shape, for comparing CLI output against the sanitize oracle. */
-const envelope = ({ cleaned, found, warnings }) => ({ cleaned, found, warnings });
+const envelope = ({ cleaned, found, warnings }) => ({
+  cleaned,
+  found,
+  warnings,
+});
 
 // Inputs spanning every layer: a Cf char (Layer 1), clean passthrough, a hidden
 // element + an exfil-shaped URL (Layers 2/3, html mode). Each carries the html
@@ -56,7 +60,10 @@ describe("CLI: worker mode", () => {
     const lines = run(["--worker"], `${input}\n`).trim().split("\n");
     assert.equal(lines.length, CASES.length);
     for (const [i, { text, html }] of CASES.entries()) {
-      assert.deepEqual(JSON.parse(lines[i]), envelope(await sanitize(text, { html })));
+      assert.deepEqual(
+        JSON.parse(lines[i]),
+        envelope(await sanitize(text, { html })),
+      );
     }
   });
 
