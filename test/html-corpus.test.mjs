@@ -22,6 +22,9 @@ import { sanitizeHtml, detectExfil, checkExfilUrl } from "../src/html.mjs";
 const CANARY = "CANARY_d41d8c";
 const hidden = (decl) => `<div style="${decl}">${CANARY}</div>`;
 const NEEDLE = "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e";
+// RFC 4648 §5 url-safe base64 (`-`/`_` for `+`/`/`) carrying a contiguous 40+
+// alnum run — a payload that dodges the standard `[A-Za-z0-9+/]` blob arms.
+const B64URL_BLOB = "ab-cd_Zm9vQmFyMTIzZm9vQmFyMTIzZm9vQmFyMTIzeXo0NTY";
 
 const CORPUS = {
   hidden: [
@@ -56,6 +59,15 @@ const CORPUS = {
     },
     { name: "visibility-collapse", input: hidden("visibility:collapse") },
     { name: "opacity-near-zero", input: hidden("opacity:0.001") },
+    { name: "opacity-negative", input: hidden("opacity:-1") },
+    {
+      name: "transform-scale-exponent",
+      input: hidden("transform:scale(1e-3)"),
+    },
+    {
+      name: "transform-translate-exponent",
+      input: hidden("transform:translateX(-1e4px)"),
+    },
     { name: "transform-scale-zero", input: hidden("transform:scale(0)") },
     {
       name: "transform-scale-near-zero",
@@ -298,6 +310,30 @@ const CORPUS = {
       input: "https://evil.example/c?data=" + "A".repeat(64),
       reason: "suspicious query parameter",
     },
+    {
+      // S4: url-safe base64 (`-`/`_`) blob in a keyword query param.
+      name: "b64url-keyword-query",
+      input: `https://evil.example/log?token=${B64URL_BLOB}`,
+      reason: "suspicious query parameter",
+    },
+    {
+      // S4: url-safe base64 blob in a non-keyword param (post-parse walk).
+      name: "b64url-nonkeyword-query",
+      input: `https://evil.example/p?h=${B64URL_BLOB}`,
+      reason: "suspicious query parameter",
+    },
+    {
+      // S4: url-safe base64 blob in a fragment param.
+      name: "b64url-fragment",
+      input: `https://ok.example/p?a=1#data=${B64URL_BLOB}`,
+      reason: "suspicious query parameter",
+    },
+    {
+      // S4: url-safe base64 blob smuggled in a path segment (beacon w/o query).
+      name: "b64url-path-segment",
+      input: `https://evil.example/${"Zm9vQmFyMTIz".repeat(11)}-_`,
+      reason: "encoded data blob in path segment",
+    },
   ],
   urlBenign: [
     { name: "fragment-anchor", input: "https://ok.example/page#section-2" },
@@ -337,6 +373,34 @@ const CORPUS = {
       name: "long-hyphenated-slug",
       input: "https://ok.example/the-" + "quick-".repeat(40) + "end",
     },
+    // S4 precision: legit url-safe shapes must NOT be mistaken for a blob.
+    {
+      // A url-safe slug: hyphen-separated words, no contiguous 40-char run.
+      name: "b64url-safe-slug",
+      input:
+        "https://e.com/p?ref=spring-2024-promo-code-alpha-beta-gamma-delta-epsilon",
+    },
+    {
+      // JWT-looking but dot-separated: each part is below the blob threshold.
+      name: "jwt-looking-benign",
+      input:
+        "https://e.com/p?ref=eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2",
+    },
+    {
+      // An allowlisted signing param may legitimately carry a url-safe blob.
+      name: "b64url-in-x-amz-signature",
+      input: `https://cdn.x/a?X-Amz-Signature=${B64URL_BLOB}`,
+    },
+    {
+      // A pagination cursor may legitimately carry a url-safe blob.
+      name: "b64url-in-cursor",
+      input: `https://api.x/items?cursor=${B64URL_BLOB}`,
+    },
+    {
+      // An analytics param may legitimately carry a url-safe blob.
+      name: "b64url-in-utm",
+      input: `https://x.com/p?utm_content=${B64URL_BLOB}`,
+    },
   ],
   // Visible content that earlier over-eager hiding heuristics could splice. A
   // false positive here DELETES legitimate text the model needed, so each row
@@ -364,8 +428,10 @@ const CORPUS = {
     },
     { name: "hanging-text-indent", input: hidden("text-indent:-0.5em") },
     { name: "dim-opacity", input: hidden("opacity:0.15") },
+    { name: "opacity-near-opaque", input: hidden("opacity:0.9") },
     { name: "small-font", input: hidden("font-size:11px") },
     { name: "mild-scale", input: hidden("transform:scale(0.8)") },
+    { name: "enlarging-scale-exponent", input: hidden("transform:scale(1e3)") },
     { name: "near-edge-rotate", input: hidden("transform:rotateY(89deg)") },
     { name: "in-plane-rotate", input: hidden("transform:rotate(90deg)") },
     { name: "partial-clip-inset", input: hidden("clip-path:inset(10%)") },

@@ -67,8 +67,13 @@ function isNearZeroLength(value) {
 // text, so this errs toward false-negative.
 const OFFSCREEN_ABSOLUTE_THRESHOLD = -900;
 const OFFSCREEN_VIEWPORT_THRESHOLD = -100;
-const ABSOLUTE_UNIT_RE = /^-?\d*\.?\d+\s*(?:px|em|rem|ex|ch|pt|pc|in|cm|mm)?$/;
-const VIEWPORT_UNIT_RE = /^-?\d*\.?\d+\s*(?:vw|vh|vmin|vmax|%)$/;
+// The numeric arm accepts a sign and scientific notation (`-1e4px`) so a
+// browser-honored exponent form is read at its true magnitude, not truncated
+// at the `e` (which would make `translateX(-1e4px)` read as `-1px`, on-screen).
+const ABSOLUTE_UNIT_RE =
+  /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:px|em|rem|ex|ch|pt|pc|in|cm|mm)?$/;
+const VIEWPORT_UNIT_RE =
+  /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:vw|vh|vmin|vmax|%)$/;
 
 /** @param {string} value @returns {boolean} */
 function isOffscreenOffset(value) {
@@ -94,9 +99,11 @@ function isOffscreenOffset(value) {
  */
 function isHidingTransform(transform) {
   if (!transform) return false;
-  // scale()/matrix() with a (near-)zero factor.
+  // scale()/matrix() with a (near-)zero factor. The numeric capture accepts a
+  // leading sign and scientific notation (`1e-3`, `-1E-4`); without the
+  // exponent arm `scale(1e-3)` would capture only `1` and read as visible.
   const scale = transform.match(
-    /\b(?:scale|scale3d|scalex|scaley|matrix|matrix3d)\(\s*(-?\d*\.?\d+)/,
+    /\b(?:scale|scale3d|scalex|scaley|matrix|matrix3d)\(\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/,
   );
   if (scale && Math.abs(parseFloat(scale[1])) < NEAR_ZERO_EPSILON) return true;
   // rotateX/rotateY by an odd multiple of 90deg turns the box edge-on (zero
@@ -221,9 +228,12 @@ export function isHiddenStyle(styleStr) {
   if (val("visibility") === "hidden" || val("visibility") === "collapse")
     return true;
 
+  // CSS clamps opacity to [0,1], so any NEGATIVE value renders fully
+  // transparent — `parseFloat < EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as
+  // hidden, where the old `Math.abs` mapped `-1` to `1` (visible) and let a
+  // negative-opacity hide slip through.
   const opacity = val("opacity");
-  if (opacity !== "" && Math.abs(parseFloat(opacity)) < NEAR_ZERO_EPSILON)
-    return true;
+  if (opacity !== "" && parseFloat(opacity) < NEAR_ZERO_EPSILON) return true;
 
   for (const dim of ["height", "width", "font-size"])
     if (isNearZeroLength(val(dim))) return true;
@@ -355,6 +365,15 @@ export function closingTagName(htmlValue) {
 
 export const COMMENT_PLACEHOLDER = "[HTML comment removed]";
 export const HIDDEN_PLACEHOLDER = "[hidden HTML removed]";
+// Shown when the remark/rehype parse itself fails (e.g. pathologically nested
+// markup overflows the recursive tree walk with a RangeError). The top-level
+// `sanitize`/`sanitizeText` contract is "never throws, `cleaned` is always a
+// string", and this module is the only seam those callers own — so the HTML
+// layer must fail CLOSED here: withhold the whole unparseable input behind one
+// placeholder rather than let the exception escape and suppress all tool
+// output. Withholding (not passing through) is the safe choice — content we
+// could not inspect for hidden payloads is treated as if it were hidden.
+export const UNPARSEABLE_PLACEHOLDER = "[HTML unparseable — withheld]";
 
 /**
  * Replace each range of `text` with its kind's placeholder, preserving every
@@ -704,9 +723,24 @@ export function looksLikeHtmlSource(text) {
  */
 export function sanitizeHtml(text) {
   if (!HTML_TAG_PRESENT.test(text)) return null;
-  const { ranges, warned } = looksLikeHtmlSource(text)
-    ? scanHtmlFragment(text)
-    : scanMarkdown(text);
+  /** @type {{ ranges: Array<{start: number, end: number, kind: "comment" | "hidden"}>, warned: ReturnType<typeof newWarned> }} */
+  let scan;
+  try {
+    scan = looksLikeHtmlSource(text)
+      ? scanHtmlFragment(text)
+      : scanMarkdown(text);
+  } catch {
+    // The parse/visit blew up (stack overflow on pathological nesting, or any
+    // other parser error). Fail CLOSED at this boundary so `sanitize`/
+    // `sanitizeText` keep their never-throw contract: withhold the whole input
+    // behind a placeholder and report it as hidden content removed.
+    return {
+      text: UNPARSEABLE_PLACEHOLDER,
+      removed: { comments: 0, hidden: 1 },
+      warned: newWarned(),
+    };
+  }
+  const { ranges, warned } = scan;
   if (ranges.length === 0 && !hasWarned(warned)) return null;
   const removed = { comments: 0, hidden: 0 };
   for (const range of ranges)
@@ -795,15 +829,41 @@ const VALUE_HAS_DIGIT_RE = /\d/;
 const BLOB_VALUE_B64_RE = /^[A-Za-z0-9+/]{40,}={0,2}$/;
 const BLOB_VALUE_HEX_RE = /^[A-Fa-f0-9]{32,}$/;
 
+// RFC 4648 §5 url-safe base64 substitutes `-`/`_` for `+`/`/`, so a payload
+// encoded url-safe escapes the `[A-Za-z0-9+/]` arms above. Adding `-`/`_` to the
+// charset would re-admit a long hyphenated word-slug (`the-secret-history-of-…`)
+// as a "blob", so this arm additionally REQUIRES a contiguous 40+ char
+// alphanumeric run: bulk-encoded bytes carry one (the separators `-`/`_` are
+// rare in random base64url output), a human slug never does (every word breaks
+// the run at a hyphen well under 40). The contiguous-run length matches the
+// standard-base64 blob threshold, so the two arms agree on what counts as a
+// blob. Anchored to the whole value for the same RAW-query reason as above.
+const BLOB_VALUE_B64URL_RE = /^[A-Za-z0-9_-]{40,}={0,2}$/;
+const B64URL_RUN_RE = /[A-Za-z0-9]{40,}/;
+
 // A path segment whose whole value is a base64/hex run longer than any standard
 // content hash (SHA-512 hex is 128, base64 88; SHA-256 hex 64) is bulk encoded
 // data — a beacon URL that smuggles its payload in the path to dodge the query
 // walk — rather than an asset fingerprint. The threshold sits just above the
 // SHA-512-hex ceiling so every real fingerprint clears it while a ~150-char
-// base64 of stolen cookies does not. Hyphens/underscores are excluded so a long
-// word-slug (`the-secret-history-of-…`) is not mistaken for a payload.
+// base64 of stolen cookies does not. Hyphens/underscores are excluded from the
+// standard arm so a long word-slug (`the-secret-history-of-…`) is not mistaken
+// for a payload; the url-safe arm re-admits `-`/`_` but, like the query arm
+// above, gates on a contiguous 40+ alphanumeric run to keep the slug benign.
 const PATH_BLOB_RE = /^(?:[A-Za-z0-9+/]+={0,2}|[A-Fa-f0-9]+)$/;
 const PATH_BLOB_MIN_LEN = 128;
+
+/**
+ * True for an entirely-url-safe-base64 value carrying a contiguous 40+
+ * alphanumeric run — a url-safe-encoded blob, distinguished from a hyphenated
+ * slug (which never sustains a 40-char unbroken run). Shared by the query and
+ * path blob detectors.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isBase64UrlBlob(value) {
+  return BLOB_VALUE_B64URL_RE.test(value) && B64URL_RUN_RE.test(value);
+}
 
 /**
  * RAW (un-decoded) `name=value` pairs of a query/fragment string, split on `&`
@@ -843,7 +903,11 @@ function paramExfilReason(name, value) {
     matchesSecretHint(value)
   )
     return "credential-shaped token in URL parameter";
-  if (BLOB_VALUE_B64_RE.test(value) || BLOB_VALUE_HEX_RE.test(value))
+  if (
+    BLOB_VALUE_B64_RE.test(value) ||
+    BLOB_VALUE_HEX_RE.test(value) ||
+    isBase64UrlBlob(value)
+  )
     return "suspicious query parameter";
   return null;
 }
@@ -916,7 +980,10 @@ function checkUrlParams(parsed) {
  */
 function checkUrlPath(parsed) {
   for (const segment of parsed.pathname.split("/")) {
-    if (segment.length > PATH_BLOB_MIN_LEN && PATH_BLOB_RE.test(segment))
+    if (
+      segment.length > PATH_BLOB_MIN_LEN &&
+      (PATH_BLOB_RE.test(segment) || isBase64UrlBlob(segment))
+    )
       return "encoded data blob in path segment";
   }
   return null;
@@ -1105,34 +1172,48 @@ export function detectExfil(text) {
   /** @type {Array<{ isImage: boolean, reason: string, target: string }>} */
   const threats = [];
 
-  // Remark AST handles markdown links/images/definitions (balanced parens,
-  // reference links) correctly, unlike a hand-rolled regex.
-  const tree = mdParser.parse(text);
-  visit(tree, (node) => {
-    if (
-      node.type !== "link" &&
-      node.type !== "image" &&
-      node.type !== "definition"
-    )
-      return;
-    const reason = checkExfilUrl(node.url);
-    if (!reason) return;
-    threats.push({
-      isImage: node.type === "image",
-      reason,
-      target: urlHost(node.url),
+  try {
+    // Remark AST handles markdown links/images/definitions (balanced parens,
+    // reference links) correctly, unlike a hand-rolled regex.
+    const tree = mdParser.parse(text);
+    visit(tree, (node) => {
+      if (
+        node.type !== "link" &&
+        node.type !== "image" &&
+        node.type !== "definition"
+      )
+        return;
+      const reason = checkExfilUrl(node.url);
+      if (!reason) return;
+      threats.push({
+        isImage: node.type === "image",
+        reason,
+        target: urlHost(node.url),
+      });
     });
-  });
 
-  // HTML attributes (not AST nodes in remark).
-  for (const { url, isImage, context } of extractHtmlUrls(text)) {
-    const reason =
-      checkExfilUrl(url) ||
-      (context !== "resource" && isOffOrigin(url)
-        ? OFF_ORIGIN_REASON[context]
-        : null);
-    if (!reason) continue;
-    threats.push({ isImage, reason, target: urlHost(url) });
+    // HTML attributes (not AST nodes in remark).
+    for (const { url, isImage, context } of extractHtmlUrls(text)) {
+      const reason =
+        checkExfilUrl(url) ||
+        (context !== "resource" && isOffOrigin(url)
+          ? OFF_ORIGIN_REASON[context]
+          : null);
+      if (!reason) continue;
+      threats.push({ isImage, reason, target: urlHost(url) });
+    }
+  } catch {
+    // The parse/visit blew up (stack overflow on pathological nesting). Fail
+    // CLOSED so the never-throw contract holds: report one sentinel threat so
+    // the caller still warns rather than crashing, since an input too nested to
+    // scan could itself be hiding an exfil URL.
+    return [
+      {
+        isImage: false,
+        reason: "input too deeply nested to scan for exfil URLs",
+        target: "(unparseable HTML)",
+      },
+    ];
   }
 
   return threats.length > 0 ? threats : null;
