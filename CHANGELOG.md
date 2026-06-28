@@ -8,6 +8,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.3] - 2026-06-28
+
+### Fixed
+- HTML text-hiding detection now catches more CSS techniques to prevent leaking of invisible text
+- Layer1 processor now handles OSC payloads, strips zero-width combining marks, recognizes C1 SGR sequences, and caps joiner runs
+- Instructions scanner now safely skips dangling symlinks in the working directory instead of aborting
+- CLI/Python bridge is now hardened against hangs, crashes, and oversized input
+- Instructions scanning is now contained to the working directory with symlink refusal and atomic writes
+
 ## [1.2.1] - 2026-06-28
 
 ### Fixed
