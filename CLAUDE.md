@@ -38,6 +38,7 @@ Commits MUST use [Conventional Commits](https://www.conventionalcommits.org/) (`
 
 ## Code Style
 
+- **Favor precision over recall in the detection/transform layers.** A false positive here is a real harm: splicing or rewriting legitimate content removes text the model needed, and a noisy flag trains operators to ignore the signal (alert fatigue). When a heuristic can’t cleanly separate a true payload from benign input, prefer the false negative—let it pass rather than mangle real content—and say so. Concretely: validate against the actual tokenizer/parser, not a hand-rolled approximation; gate keyword matches on the value’s shape, not the name alone; fail _open_ (treat as visible/benign) on an ambiguous `calc()`/unit/encoding you can’t resolve; and pair every new detector with negative tests over a corpus of legitimate inputs asserting zero findings. If a heuristic only adds recall at the cost of precision, drop it.
 - Fail loudly: throw errors over silent warnings; never remove error output unless the user explicitly asks
 - Let exceptions propagate—never use try/except unless there is a specific, necessary recovery action. Default to crashing on unexpected input
 - Un-nest conditionals; combine related checks
