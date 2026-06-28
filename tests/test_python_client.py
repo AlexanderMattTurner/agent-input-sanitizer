@@ -517,9 +517,9 @@ def test_close_kills_grandchild_via_process_group() -> None:
         grandchild_pid = None
         while time.monotonic() < deadline:
             text = worker._drain_stderr()
-            match = re.search(r"grandchild:(\d+)", text)
+            match = re.search(r"grandchild:(?P<pid>\d+)", text)
             if match:
-                grandchild_pid = int(match.group(1))
+                grandchild_pid = int(match.group("pid"))
                 break
             time.sleep(0.05)
         assert grandchild_pid is not None, "fake worker never reported a grandchild"
