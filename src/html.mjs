@@ -57,14 +57,16 @@ function isNearZeroLength(value) {
   return Number.isFinite(number) && Math.abs(number) < NEAR_ZERO_EPSILON;
 }
 
-// A negative offset is "offscreen" once it pushes content past the viewport
-// edge — but how far that is depends on the unit. An absolute unit (px and the
-// font/char units) needs a large magnitude (~-900px); a viewport/percent unit
-// pushes a full screen-width with a single-digit-ish magnitude (-50vw, -100%
-// clear the viewport), so it gets a small threshold. `calc(...)` and other
-// un-parseable offscreen-shaped values fail closed (treated as hidden).
+// A negative offset is "offscreen" only when it pushes the element ENTIRELY
+// past the viewport edge — the magnitude that takes depends on the unit. An
+// absolute unit (px and the font/char units) needs a large magnitude
+// (< -900px). A viewport/percent unit clears the screen only at a full
+// viewport-width: -100vw / -100% push a normal-width element fully out, but
+// -50vw / -50% leave roughly half of it on screen, so the threshold is a full
+// -100, not a partial shift. Flagging a partial shift would splice visible
+// text, so this errs toward false-negative.
 const OFFSCREEN_ABSOLUTE_THRESHOLD = -900;
-const OFFSCREEN_VIEWPORT_THRESHOLD = -50;
+const OFFSCREEN_VIEWPORT_THRESHOLD = -100;
 const ABSOLUTE_UNIT_RE = /^-?\d*\.?\d+\s*(?:px|em|rem|ex|ch|pt|pc|in|cm|mm)?$/;
 const VIEWPORT_UNIT_RE = /^-?\d*\.?\d+\s*(?:vw|vh|vmin|vmax|%)$/;
 
@@ -75,11 +77,11 @@ function isOffscreenOffset(value) {
     return parseFloat(value) < OFFSCREEN_ABSOLUTE_THRESHOLD;
   if (VIEWPORT_UNIT_RE.test(value))
     return parseFloat(value) <= OFFSCREEN_VIEWPORT_THRESHOLD;
-  // `calc(-100vw)` / `calc(-9999px - 1em)` and other complex expressions: a
-  // unit-blind parseFloat can't resolve them, so fail closed when the value is
-  // shaped like an offscreen push (contains a large-ish negative number).
-  const calcMatch = value.match(/calc\([^)]*\)/);
-  if (calcMatch) return /-\s*\d/.test(calcMatch[0]);
+  // `calc(...)` is deliberately NOT treated as offscreen. Resolving a calc
+  // needs the layout context (`calc(100% - 5px)` is an ordinary in-flow
+  // position), and a unit-blind "contains a negative number" guess flags those
+  // benign expressions — which would splice visible text. Ambiguity must fail
+  // OPEN (visible), so unresolved calc is left alone.
   return false;
 }
 
