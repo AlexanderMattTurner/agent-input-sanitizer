@@ -633,22 +633,28 @@ describe("applyLayer1: OSC strings and C1 sequences", () => {
   });
 
   // The deliberate bounded-intro / negated-body design keeps the ANSI grammar
-  // linear; an adversarial never-completing string must not blow up. Assert the
-  // work scales ~linearly (not super-linearly) with input size.
-  it("OSC/CSI stripping stays ~linear on adversarial never-terminating input", () => {
-    const time = (n) => {
-      const input = `${ESC}]` + ";".repeat(n) + `${ESC}[` + ";#".repeat(n);
-      const t0 = process.hrtime.bigint();
-      applyLayer1(input);
-      return Number(process.hrtime.bigint() - t0);
-    };
-    // Warm up, then compare 10x size: linear ⇒ ratio well under quadratic (100x).
-    time(2000);
-    const small = Math.max(time(20000), 1);
-    const big = time(200000);
+  // linear; an adversarial never-completing string must not blow up.
+  //
+  // We assert a GENEROUS ABSOLUTE wall-clock bound on one pass over a large
+  // adversarial input, not a ratio of two timings. The old ratio test
+  // (big / small < 40) divided by a tiny ~20k-char `small` denominator: under
+  // CI load spikes that denominator is so small and noisy that genuinely-linear
+  // code spikes the ratio past the threshold, producing false reds (it flaked
+  // #37 while passing locally). An absolute bound has no noisy denominator yet
+  // still catches the ReDoS class with a huge margin: linear stripping of this
+  // 400k-char input is single-digit milliseconds, whereas catastrophic /
+  // quadratic backtracking on a never-terminating n=200000 input would run for
+  // tens of seconds — orders of magnitude past 2000ms. So 2000ms cleanly
+  // separates linear-with-headroom from any super-linear blowup.
+  it("OSC/CSI stripping stays linear on adversarial never-terminating input", () => {
+    const n = 200000;
+    const input = `${ESC}]` + ";".repeat(n) + `${ESC}[` + ";#".repeat(n);
+    const t0 = process.hrtime.bigint();
+    applyLayer1(input);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
     assert.ok(
-      big / small < 40,
-      `super-linear scaling: ${small}ns -> ${big}ns (ratio ${(big / small).toFixed(1)})`,
+      ms < 2000,
+      `applyLayer1 on a ${input.length}-char adversarial input took ${ms.toFixed(1)}ms (>= 2000ms suggests super-linear backtracking)`,
     );
   });
 });
