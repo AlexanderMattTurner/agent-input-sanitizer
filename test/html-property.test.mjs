@@ -241,6 +241,41 @@ describe("property: isHiddenStyle never throws on arbitrary input", () => {
   });
 });
 
+// ─── 2b. CSS numeric parsing matches parseFloat (exponents/signs) ────────────
+
+// A CSS numeric literal across the forms a browser honors: plain, signed,
+// fractional, and scientific notation. Built as a string so the detector's
+// regex capture — not a hand-rolled number — is what gets exercised.
+const cssNumber = fc
+  .tuple(
+    fc.constantFrom("", "-", "+"),
+    fc.constantFrom("0", "1", "9", "0.5", "1.5", "12", "0.0001"),
+    fc.constantFrom("", "e3", "e-3", "E-4", "e+2", "e0"),
+  )
+  .map(([sign, mantissa, exp]) => `${sign}${mantissa}${exp}`)
+  // Keep only literals JS parses to a finite number (a bare "+"/"-" or "0e"
+  // would be NaN and is not a value a browser would render).
+  .filter((s) => Number.isFinite(parseFloat(s)) && /\d/.test(s));
+
+describe("property: isHiddenStyle reads CSS numerics at parseFloat magnitude", () => {
+  // scale() is hidden iff |parseFloat(n)| < 0.01 — exponent forms included, so
+  // scale(1e-3) reads as 0.001 (hidden) and scale(1e3) as 1000 (visible). The
+  // verdict must equal the parseFloat-based oracle, never a capture truncated
+  // at `e`.
+  it("scale() verdict equals the |parseFloat| < epsilon oracle", () =>
+    checkProperty(cssNumber, (n) => {
+      const expected = Math.abs(parseFloat(n)) < 0.01;
+      assert.equal(isHiddenStyle(`transform:scale(${n})`), expected);
+    }));
+  // opacity is CSS-clamped to [0,1]: hidden iff parseFloat(n) < 0.01 (NO abs),
+  // so any negative is fully transparent (hidden) and 0.9/1 stay visible.
+  it("opacity verdict equals the parseFloat < epsilon oracle (no abs)", () =>
+    checkProperty(cssNumber, (n) => {
+      const expected = parseFloat(n) < 0.01;
+      assert.equal(isHiddenStyle(`opacity:${n}`), expected);
+    }));
+});
+
 // ─── 3. URL exfil monotonicity ───────────────────────────────────────────────
 
 const base64Char = fc.constantFrom(

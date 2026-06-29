@@ -23,8 +23,10 @@ import {
   REPORTED_TAGS,
   COMMENT_PLACEHOLDER,
   HIDDEN_PLACEHOLDER,
+  UNPARSEABLE_PLACEHOLDER,
   DATA_URI_LENGTH_THRESHOLD,
 } from "../src/html.mjs";
+import { sanitize } from "../src/index.mjs";
 
 const applyHtml = (text) => sanitizeHtml(text)?.text ?? text;
 
@@ -49,6 +51,10 @@ const HIDDEN_STYLE_CASES = [
   ["opacity:0.5", false],
   ["opacity:1", false],
   ["opacity:5", false],
+  ["opacity:-1", true], // CSS clamps to [0,1]; any negative is fully transparent
+  ["opacity:-0.5", true], // (bug: Math.abs mapped -1→1, read as visible)
+  ["opacity:-0.001", true],
+  ["opacity:0.9", false], // ordinary near-opaque value stays visible
   // ── zero / near-zero size (epsilon) ──
   ["height:0", true],
   ["width:0", true],
@@ -106,6 +112,12 @@ const HIDDEN_STYLE_CASES = [
   ["transform:scale(0)", true],
   ["transform:scale( 0)", true],
   ["transform:scale(0.0001)", true], // near-zero scale (bug: exact 0 only)
+  ["transform:scale(1e-3)", true], // exponent (bug: capture stopped at `e`, read scale(1))
+  ["transform:scale(1E-3)", true], // uppercase exponent
+  ["transform:scale(-1e-4)", true], // signed exponent magnitude is near-zero
+  ["transform:translateX(-1e4px)", true], // -10000px offscreen via exponent
+  ["transform:scale(1e3)", false], // exponent enlarges — visible, not near-zero
+  ["transform:scale(1e0)", false], // 1e0 === 1, visible
   ["transform:matrix(0,0,0,0,0,0)", true],
   ["transform:rotateY(90deg)", true], // edge-on (bug: not detected)
   ["transform:rotateX(90deg)", true],
@@ -339,6 +351,56 @@ describe("unit: checkExfilUrl exact verdicts", () => {
     assert.equal(checkExfilUrl("https://e.com/p?q=hello"), null));
   it("does not throw on an unparsable URL", () =>
     assert.equal(checkExfilUrl("https://exa mple.example/p"), null));
+
+  // ── S4: RFC 4648 url-safe base64 (`-`/`_`) blob detection ──
+  // A url-safe-encoded blob: `-`/`_` in place of `+`/`/`, carrying a contiguous
+  // 40+ alnum run that no hyphenated slug sustains.
+  const b64url = "ab-cd_" + "Zm9vQmFyMTIzZm9vQmFyMTIzZm9vQmFyMTIzeXo0NTY";
+  it("flags a base64url blob in a keyword query param (raw pre-parse scan)", () =>
+    assert.equal(
+      checkExfilUrl(`https://e.com/p?token=${b64url}`),
+      "suspicious query parameter",
+    ));
+  it("flags a base64url blob in a non-keyword query param (post-parse walk)", () =>
+    assert.equal(
+      checkExfilUrl(`https://e.com/p?h=${b64url}`),
+      "suspicious query parameter",
+    ));
+  it("flags a base64url blob in a fragment param", () =>
+    assert.equal(
+      checkExfilUrl(`https://e.com/p?a=1#data=${b64url}`),
+      "suspicious query parameter",
+    ));
+  it("flags a long base64url blob smuggled in a path segment", () =>
+    assert.equal(
+      checkExfilUrl(`https://e.com/${"Zm9vQmFyMTIz".repeat(11)}-_`),
+      "encoded data blob in path segment",
+    ));
+  // ── S4 negatives: legit url-safe shapes must still be null ──
+  it("leaves a url-safe slug (hyphens, no 40-run) alone", () =>
+    assert.equal(
+      checkExfilUrl(
+        "https://e.com/p?ref=spring-2024-promo-code-alpha-beta-gamma-delta",
+      ),
+      null,
+    ));
+  it("leaves a benign JWT-looking but separator-broken value alone", () =>
+    // Three dot-separated parts, each below the 40-char blob threshold.
+    assert.equal(
+      checkExfilUrl(
+        "https://e.com/p?ref=eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2",
+      ),
+      null,
+    ));
+  it("leaves an X-Amz signature carrying a base64url value alone (allowlisted)", () =>
+    assert.equal(
+      checkExfilUrl(`https://cdn.x/a?X-Amz-Signature=${b64url}`),
+      null,
+    ));
+  it("leaves a cursor param carrying a base64url value alone (allowlisted)", () =>
+    assert.equal(checkExfilUrl(`https://api.x/items?cursor=${b64url}`), null));
+  it("leaves a utm_* param carrying a base64url value alone (allowlisted)", () =>
+    assert.equal(checkExfilUrl(`https://x.com/p?utm_content=${b64url}`), null));
 });
 
 describe("unit: urlHost exact verdicts", () => {
@@ -542,6 +604,66 @@ describe("unit: sanitizeHtml exact result shapes", () => {
     ));
   it("returns null when there is no HTML tag at all (gate)", () =>
     assert.equal(sanitizeHtml("plain prose, nothing to do"), null));
+});
+
+// R1: a pathologically nested fragment overflows the recursive remark/rehype
+// tree walk with a RangeError. The HTML layer is the only seam the top-level
+// `sanitize`/`sanitizeText` callers own, so it must fail CLOSED here rather than
+// let the exception escape and break their never-throw contract.
+describe("R1: parser stack overflow fails closed (never throws)", () => {
+  const deeplyNested = (depth) =>
+    "<div>".repeat(depth) + "x" + "</div>".repeat(depth);
+  const OVERFLOW = deeplyNested(3000);
+
+  it("sanitizeHtml withholds the input behind a placeholder instead of throwing", () => {
+    const result = sanitizeHtml(OVERFLOW);
+    assert.equal(result.text, UNPARSEABLE_PLACEHOLDER);
+    assert.deepEqual(result.removed, { comments: 0, hidden: 1 });
+    assert.deepEqual(result.warned, { tags: {}, dataSrc: 0 });
+  });
+
+  it("detectExfil returns one sentinel threat instead of throwing", () => {
+    const threats = detectExfil(OVERFLOW);
+    assert.equal(threats.length, 1);
+    assert.equal(threats[0].target, "(unparseable HTML)");
+    assert.match(threats[0].reason, /too deeply nested/);
+  });
+
+  it("top-level sanitize(html:true) never throws and returns a warned string", async () => {
+    const { cleaned, found, warnings } = await sanitize(OVERFLOW, {
+      html: true,
+    });
+    assert.equal(typeof cleaned, "string");
+    assert.equal(cleaned, UNPARSEABLE_PLACEHOLDER);
+    assert.ok(found.includes("hidden-html"));
+    assert.ok(found.includes("exfil-urls"));
+    assert.ok(warnings.length > 0);
+  });
+
+  it("property: random deeply-nested fragments never throw", () => {
+    fc.assert(
+      fc.property(
+        fc.tuple(
+          fc.constantFrom("div", "span", "p", "section", "b"),
+          fc.integer({ min: 2000, max: 4000 }),
+        ),
+        ([tag, depth]) => {
+          const nested =
+            `<${tag}>`.repeat(depth) + "y" + `</${tag}>`.repeat(depth);
+          // Neither exported parse-driven entry point may throw, whether or not
+          // this particular depth overflows. sanitizeHtml returns null or an
+          // object whose `.text` is a string; detectExfil returns null or an
+          // array. The point is the absence of a thrown RangeError.
+          const html = sanitizeHtml(nested);
+          assert.ok(html === null || typeof html.text === "string");
+          const exfil = detectExfil(nested);
+          assert.ok(exfil === null || Array.isArray(exfil));
+        },
+      ),
+      // A few deep runs are enough; each parse is expensive, so keep numRuns low.
+      fcRunOptions({ numRuns: 15 }),
+    );
+  });
 });
 
 // Run detectExfil and assert it produced exactly one threat, returning it.
