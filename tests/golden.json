@@ -24,12 +24,16 @@
       "plain": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -37,12 +41,16 @@
       "plain": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -50,12 +58,16 @@
       "plain": {
         "cleaned": [97, 101, 118, 105, 108, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 101, 118, 105, 108, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -63,12 +75,16 @@
       "plain": {
         "cleaned": [99, 111, 111, 112, 101, 114, 97, 116, 101],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [99, 111, 111, 112, 101, 114, 97, 116, 101],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -89,12 +105,16 @@
       "plain": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -128,12 +148,16 @@
       "plain": {
         "cleaned": [28450, 23383, 32, 116, 101, 115, 116],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [28450, 23383, 32, 116, 101, 115, 116],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -141,12 +165,16 @@
       "plain": {
         "cleaned": [114, 101, 100],
         "found": ["ansi"],
-        "warnings": ["Stripped: ANSI escapes"]
+        "warnings": [
+          "Stripped: ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [114, 101, 100],
         "found": ["ansi"],
-        "warnings": ["Stripped: ANSI escapes"]
+        "warnings": [
+          "Stripped: ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -154,12 +182,16 @@
       "plain": {
         "cleaned": [119, 105, 112, 101],
         "found": ["ansi"],
-        "warnings": ["Stripped: ANSI escapes"]
+        "warnings": [
+          "Stripped: ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [119, 105, 112, 101],
         "found": ["ansi"],
-        "warnings": ["Stripped: ANSI escapes"]
+        "warnings": [
+          "Stripped: ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -167,12 +199,16 @@
       "plain": {
         "cleaned": [109, 111, 118, 101],
         "found": ["ansi"],
-        "warnings": ["Stripped: ANSI escapes"]
+        "warnings": [
+          "Stripped: ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [109, 111, 118, 101],
         "found": ["ansi"],
-        "warnings": ["Stripped: ANSI escapes"]
+        "warnings": [
+          "Stripped: ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -180,12 +216,16 @@
       "plain": {
         "cleaned": [97, 66, 99],
         "found": ["cf-format", "ansi"],
-        "warnings": ["Stripped: Format chars (Cf), ANSI escapes"]
+        "warnings": [
+          "Stripped: Format chars (Cf), ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 66, 99],
         "found": ["cf-format", "ansi"],
-        "warnings": ["Stripped: Format chars (Cf), ANSI escapes"]
+        "warnings": [
+          "Stripped: Format chars (Cf), ANSI escapes — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -193,12 +233,16 @@
       "plain": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 98],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -206,12 +250,16 @@
       "plain": {
         "cleaned": [97, 98],
         "found": ["variation-selectors"],
-        "warnings": ["Stripped: Variation selectors"]
+        "warnings": [
+          "Stripped: Variation selectors — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [97, 98],
         "found": ["variation-selectors"],
-        "warnings": ["Stripped: Variation selectors"]
+        "warnings": [
+          "Stripped: Variation selectors — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
@@ -224,12 +272,16 @@
       "plain": {
         "cleaned": [108, 105, 110, 101, 49, 10, 108, 105, 110, 101, 50],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       },
       "html": {
         "cleaned": [108, 105, 110, 101, 49, 10, 108, 105, 110, 101, 50],
         "found": ["cf-format"],
-        "warnings": ["Stripped: Format chars (Cf)"]
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
       }
     },
     {
