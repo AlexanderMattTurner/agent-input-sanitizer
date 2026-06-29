@@ -44,7 +44,7 @@ any particular harness.
 | 8   | `/rehydrate`    | Re-anchor a model Edit composed from the _sanitized_ view back onto real bytes; deny anything ambiguous or secret-exposing.                                | `io`                        |
 | —   | `/view-map`     | Pure offset/text machinery mapping a file's on-disk bytes ↔ the sanitized view (Layer-1 deletions, Layer-4 redactions). No I/O — consumed by `/rehydrate`. | —                           |
 
-See [THREAT-MODEL.md](./THREAT-MODEL.md) for per-vector detail.
+See [`THREAT-MODEL.md`](./THREAT-MODEL.md) for per-vector detail.
 
 ### Examples
 
