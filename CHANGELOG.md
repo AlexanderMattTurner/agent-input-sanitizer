@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.2.10] - 2026-06-29
+
+### Fixed
+
+- CLI now correctly executes when launched through a `node_modules/.bin` symlink.
+- Output handling improved with recursion depth bounding, cycle detection, and flagging of hidden characters in object keys.
+
 ## [1.2.8] - 2026-06-28
 
 ### Fixed
