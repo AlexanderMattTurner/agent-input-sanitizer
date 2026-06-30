@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.4] - 2026-06-30
+
+### Added
+
+- SECURITY.md is now included in npm tarball distributions
+- Documentation of input size cap
+
 ## [1.4.2] - 2026-06-29
 
 ### Changed
