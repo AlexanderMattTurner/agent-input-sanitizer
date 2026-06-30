@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.4.10] - 2026-06-30
+
+### Fixed
+- Reject non-ASCII fold and out-of-range index in confusables to prevent input corruption.
+- Strip the whole C1 control block so DCS/SOS/PM/APC strings can't survive in layer1.
+
 ## [1.4.9] - 2026-06-30
 
 ### Changed
