@@ -139,7 +139,8 @@
     "types",
     "LICENSE",
     "README.md",
-    "THREAT-MODEL.md"
+    "THREAT-MODEL.md",
+    "SECURITY.md"
   ],
   "dependencies": {
     "rehype-parse": "9.0.1",

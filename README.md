@@ -101,6 +101,20 @@ await rehydrateRedacted("Edit", toolInput, {
 }); // { updatedInput, context } | { deny } | null — a deny never exposes a secret
 ```
 
+## Limits
+
+The CLI (and the worker that backs the Python client) rejects any single request
+larger than `AGENT_SANITIZER_MAX_INPUT_BYTES` UTF-8 bytes — **default 10 MiB** —
+with a structured error instead of buffering an unbounded payload. Raise or lower
+it by setting that environment variable in the calling process.
+
+## Security
+
+Found a vulnerability? See [`SECURITY.md`](./SECURITY.md) for the private
+disclosure channel — it ships in the npm tarball, so it is also available offline
+from an installed copy. [`THREAT-MODEL.md`](./THREAT-MODEL.md) covers what each
+layer does and does not defend against.
+
 ## Non-JS pipelines (Python, etc.)
 
 The JS is the **single source of truth**—non-JS callers drive the same verdicts
