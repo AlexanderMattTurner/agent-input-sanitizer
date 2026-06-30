@@ -352,6 +352,15 @@ describe("isSgrOnly", () => {
     assert.equal(isSgrOnly(`${cp(0x9d)}0;title${cp(0x07)}`), false));
   it("stays true for a genuine 7-bit SGR color string", () =>
     assert.equal(isSgrOnly(`${cp(0x1b)}[31mred${cp(0x1b)}[0m`), true));
+
+  // The other C1 string introducers (DCS/SOS/PM/APC) and C1 ST are NOT SGR, so
+  // a residual one must read as NOT SGR-only — exactly as U+009B/U+009D do. One
+  // case per member so narrowing the introducer range (away from the full C1
+  // block) can't pass: each member would then slip through as "SGR-only".
+  for (const c1 of [0x90, 0x98, 0x9c, 0x9e, 0x9f]) {
+    it(`is false for a residual C1 introducer U+${c1.toString(16).toUpperCase()}`, () =>
+      assert.equal(isSgrOnly(`${cp(c1)}payload`), false));
+  }
 });
 
 // ─── LONG_RUN_RE ─────────────────────────────────────────────────────────────
