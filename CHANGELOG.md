@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.5.0] - 2026-06-30
+
+### Added
+
+- Add support for additional CSS techniques to hide elements: `content-visibility:hidden`, `filter:opacity(0)`, and two-axis offscreen translate.
+
 ## [1.4.10] - 2026-06-30
 
 ### Fixed
