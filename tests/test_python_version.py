@@ -40,9 +40,9 @@ def _read_version(pyproject: Path) -> str:
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        match = re.match(r'version\s*=\s*"([^"]+)"', stripped)
+        match = re.match(r'version\s*=\s*"(?P<value>[^"]+)"', stripped)
         if match:
-            return match.group(1)
+            return match.group("value")
     raise AssertionError(f"no version field found in {pyproject}")
 
 
@@ -72,7 +72,9 @@ def test_version_independence_policy_is_documented() -> None:
         "python/pyproject.toml — restore it before changing the version policy"
     )
     npm_version = re.search(
-        r'"version":\s*"([^"]+)"',
+        r'"version":\s*"(?P<value>[^"]+)"',
         (REPO_ROOT / "package.json").read_text(encoding="utf-8"),
     )
-    assert npm_version and npm_version.group(1), "npm package.json version missing"
+    assert npm_version and npm_version.group("value"), (
+        "npm package.json version missing"
+    )
