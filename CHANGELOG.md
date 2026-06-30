@@ -8,6 +8,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.6.0] - 2026-06-30
+
+### Added
+- CLI now supports `--help` and `-h` flags to display help information.
+
+### Changed
+- CLI now rejects unknown flags instead of hanging on stdin.
+
 ## [1.5.0] - 2026-06-30
 
 ### Added
