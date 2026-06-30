@@ -82,4 +82,24 @@ describe("packaging contract: exports map vs. published tarball", () => {
       `exports promise runtime files the tarball does not ship: ${missing.join(", ")}`,
     );
   });
+
+  // Top-level docs a consumer reaches for from an installed copy: the license,
+  // the readme, the threat model, and — so a vulnerability is reported privately
+  // rather than filed in the open — the disclosure policy. Each must be listed in
+  // `files` AND actually land in the tarball; a literal entry that doesn't pack
+  // (typo, renamed/deleted file) is the regression this guards.
+  it("ships the user-facing top-level docs", () => {
+    const docs = ["LICENSE", "README.md", "THREAT-MODEL.md", "SECURITY.md"];
+    for (const doc of docs)
+      assert.ok(
+        pkg.files.includes(doc),
+        `package.json "files" is missing ${doc}`,
+      );
+    const missing = docs.filter((f) => !packed.has(f));
+    assert.deepEqual(
+      missing,
+      [],
+      `top-level docs listed in "files" but not packed: ${missing.join(", ")}`,
+    );
+  });
 });
