@@ -3,7 +3,7 @@
 # This packages ONLY the thin Python bridge (`agent_input_sanitizer`). The
 # sanitization logic is the JavaScript in `src/` and is deliberately NOT bundled
 # into the wheel: a vendored copy is the exact drift this design avoids. An
-# installed package therefore needs Node.js (>=20) on PATH and the path to a
+# installed package therefore needs Node.js (>=22) on PATH and the path to a
 # JavaScript checkout's CLI, supplied via the `AGENT_SANITIZER_CLI` environment
 # variable (see the package docstring). Run `python -m build` from this `python/`
 # directory to produce the sdist/wheel.

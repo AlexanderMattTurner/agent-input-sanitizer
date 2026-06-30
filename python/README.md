@@ -8,7 +8,7 @@ second implementation to keep in sync.
 
 ## Requirements
 
-- Node.js (>= 20) on `PATH`. There is deliberately no pure-Python fallback.
+- Node.js (>= 22) on `PATH`. There is deliberately no pure-Python fallback.
 - The path to a JavaScript checkout's CLI. The wheel does **not** bundle the JS
   (a vendored copy would drift), so set `AGENT_SANITIZER_CLI` to the
   `bin/sanitize-cli.mjs` of a cloned/`npm install`-ed checkout. When imported

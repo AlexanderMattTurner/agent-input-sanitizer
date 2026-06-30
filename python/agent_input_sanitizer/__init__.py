@@ -3,7 +3,7 @@
 The sanitization logic has a single source of truth: the JavaScript in
 ``src/``. This module is a thin client that shells out to the
 ``bin/sanitize-cli.mjs`` CLI, so a Python pipeline gets byte-identical verdicts
-without a second implementation to keep in sync. It requires Node.js (>=20) on
+without a second implementation to keep in sync. It requires Node.js (>=22) on
 ``PATH``; there is deliberately no pure-Python fallback, because a port is
 exactly the drift this design avoids.
 
@@ -123,7 +123,7 @@ class InstructionFinding:
 
 def _node_missing(node: str) -> RuntimeError:
     return RuntimeError(
-        f"Node.js (>=20) is required but {node!r} was not found on PATH. "
+        f"Node.js (>=22) is required but {node!r} was not found on PATH. "
         "agent-input-sanitizer keeps a single JavaScript source of truth and "
         "has no pure-Python fallback; install Node to use the Python client."
     )

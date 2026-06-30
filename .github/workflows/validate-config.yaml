@@ -68,8 +68,8 @@ jobs:
       # POSIX setsid/killpg/process groups, which diverge on macOS/BSD. The Node
       # version is pinned (not matrixed) because the repo's packageManager
       # (pnpm@11.8.0) imports node:sqlite and so requires Node >=22.13 — a Node-20
-      # leg can't even bootstrap pnpm. The published library's Node>=20 runtime
-      # support is exercised by the consumer-style pack-smoke job instead.
+      # leg can't even bootstrap pnpm. That toolchain floor is why the package
+      # declares engines.node >=22 (Node 20 can't run the dev/test suite).
       - name: Setup base environment
         uses: ./.github/actions/setup-base-env
         with:
