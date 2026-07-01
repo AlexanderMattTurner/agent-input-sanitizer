@@ -8,11 +8,21 @@ second implementation to keep in sync.
 
 ## Requirements
 
-- Node.js (>= 22) on `PATH`. There is deliberately no pure-Python fallback.
-- The path to a JavaScript checkout's CLI. The wheel does **not** bundle the JS
-  (a vendored copy would drift), so set `AGENT_SANITIZER_CLI` to the
-  `bin/sanitize-cli.mjs` of a cloned/`npm install`-ed checkout. When imported
-  directly from a repo checkout, the CLI is found automatically.
+- **Node.js (>= 22) on `PATH`.** The sanitizer is JavaScript; something has to
+  run it. There is deliberately no pure-Python fallback.
+
+That's it — `pip install agent-input-sanitizer` and, with Node available, you're
+ready to go. The wheel ships a self-contained, single-file build of the CLI
+(the `src/` logic and its npm dependencies bundled into one `.mjs` at release
+time), so there is no separate JavaScript checkout to clone and no environment
+variable to set. The bundle is a versioned build artifact from `src/`, not a
+hand-maintained port, so it can't drift from the JS.
+
+### Optional: point at your own JS checkout
+
+Set `AGENT_SANITIZER_CLI` to a checkout's `bin/sanitize-cli.mjs` to override the
+bundled CLI (e.g. to run against unreleased `src/` changes). When the module is
+imported directly from a repo checkout, the source CLI is found automatically.
 
 ## Usage
 
