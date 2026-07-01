@@ -37,8 +37,10 @@ placeholders where hidden HTML was spliced out.
 ## Entry points
 
 Split into subpaths so the heavy HTML dependency stays opt-in. The **seam**
-column is the agent-specific concern each one injects, so it knows nothing about
-any particular harness.
+column marks entry points that inject the agent-specific concern (a callback
+you supply) rather than baking it in; `—` means the function is a pure
+transform with no such hook, and `fs (direct)` means it does its own file I/O
+(Node's filesystem, not an agent harness) instead of taking a callback.
 
 | #   | Import          | Purpose                                                                                                                                                    | Seam                        |
 | --- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
@@ -46,7 +48,7 @@ any particular harness.
 | 2   | `/html`         | Splice out instructions hidden in comments, `display:none`, off-screen, white-on-white, `hidden`. Leaves a placeholder.                                    | —                           |
 | 3   | `/html`         | Detect exfil-shaped URLs (payloads in query/path, embedded creds, `data:`/`javascript:`, off-origin redirects). Reports only.                              | —                           |
 | 4   | `/confusables`  | Fold look-alike glyphs in tool-call input (paths, commands) to ASCII, closing a cross-script deny-rule bypass.                                             | `scan`                      |
-| 5   | `/instructions` | Scan/auto-clean `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, etc., decoding Unicode-tag + zero-width-binary payloads.                                             | glob set                    |
+| 5   | `/instructions` | Scan/auto-clean `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, etc., decoding Unicode-tag + zero-width-binary payloads.                                             | `fs` (direct)               |
 | 6   | `/prompt`       | Classify a prompt pass / SGR-note / block on payload-capable invisible/ANSI content.                                                                       | —                           |
 | 7   | `/output`       | Run Layers 1–4 over structured tool output, preserving shape. The Layer-5 slot takes a delete-only filter.                                                 | `redact`, `filterInjection` |
 | 8   | `/rehydrate`    | Re-anchor a model Edit composed from the _sanitized_ view back onto real bytes; deny anything ambiguous or secret-exposing.                                | `io`                        |
@@ -166,10 +168,11 @@ sanitize-cli --worker                              # newline-delimited, one resp
 
 The [`python/`](./python) client wraps every bridged op (`sanitize`,
 `sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). It
-resolves the bundled CLI relative to
-its own source tree—so it runs from a repo checkout, not yet a `pip install`. The
-first `html=True` call starts a shared worker, so the ~200 ms HTML module-load
-is paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
+auto-resolves the CLI when imported from a JS repo checkout; a `pip install`ed
+wheel doesn't bundle the JS (a vendored copy would drift), so set
+`AGENT_SANITIZER_CLI` to that checkout's `bin/sanitize-cli.mjs`. The first
+`html=True` call starts a shared worker, so the ~200 ms HTML module-load is
+paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
 forces the mode and `shutdown_worker()` (also an `atexit` hook) stops it.
 
 ```python
