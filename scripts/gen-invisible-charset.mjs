@@ -29,7 +29,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Sorted, de-duped code points of every char in the given strings. */
 export function extraCodepoints() {
   const cps = new Set();
-  for (const s of [VS, BLANK_NON_CF]) for (const ch of s) cps.add(ch.codePointAt(0));
+  for (const s of [VS, BLANK_NON_CF])
+    for (const ch of s) cps.add(ch.codePointAt(0));
   return [...cps].sort((a, b) => a - b);
 }
 

@@ -13,7 +13,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { extraCodepoints, OUTPUT_PATH } from "../scripts/gen-invisible-charset.mjs";
+import {
+  extraCodepoints,
+  OUTPUT_PATH,
+} from "../scripts/gen-invisible-charset.mjs";
 import { VS, BLANK_NON_CF } from "../src/invisible.mjs";
 
 describe("invisible-charset SSOT", () => {
