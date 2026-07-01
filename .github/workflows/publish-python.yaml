@@ -1,0 +1,88 @@
+name: Publish Python to PyPI
+
+# Publishes the Python client (python/) to PyPI via OIDC Trusted Publishing —
+# no API token is stored anywhere. The Python distribution is versioned and
+# released BY HAND, independently of the npm `vX.Y.Z` line (see the comment on
+# python/pyproject.toml's version field), so this fires ONLY on a dedicated
+# `python-vX.Y.Z` tag — never on the npm release tags. To cut a release: bump
+# python/pyproject.toml's version, commit, then push a matching tag, e.g.
+#   git tag python-v1.2.6 && git push origin python-v1.2.6
+#
+# One-time PyPI setup (Trusted Publishing has no secret to rotate): on
+# pypi.org, add a "pending publisher" for project `agent-input-sanitizer`
+# pointing at this repo, workflow file `publish-python.yaml`, environment
+# `pypi`. https://docs.pypi.org/trusted-publishers/
+
+on:
+  push:
+    tags:
+      - "python-v*"
+  # Manual runs (e.g. re-publish after a failed upload) still go through Trusted
+  # Publishing; there is no tag to check, so the version guard is tag-only below.
+  workflow_dispatch:
+
+concurrency:
+  group: publish-python-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # A mistyped tag would publish the wrong, immutable version — fail here.
+      # Skipped on workflow_dispatch (no tag ref to check).
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bash .github/scripts/check-python-tag-version.sh "$GITHUB_REF"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          # No caching in a publishing workflow: a poisoned cache could tamper
+          # with the artifact we ship to PyPI (zizmor cache-poisoning).
+          enable-cache: false
+
+      - name: Build sdist and wheel
+        run: uv build
+        working-directory: python
+
+      - name: Check distribution metadata
+        run: uvx twine check python/dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: python-dist
+          path: python/dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # id-token is scoped to this job only (least privilege): the OIDC token that
+    # authenticates to PyPI must not be mintable by the build job.
+    permissions:
+      id-token: write
+    # Gating on a named environment lets PyPI's Trusted Publisher config pin the
+    # environment and lets the repo add release protections (required reviewers).
+    environment:
+      name: pypi
+      url: https://pypi.org/p/agent-input-sanitizer
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: python-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
