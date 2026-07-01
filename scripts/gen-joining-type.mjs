@@ -124,6 +124,14 @@ export function render({ joining, virama, version }) {
 
 export const UNICODE_VERSION = ${JSON.stringify(version)};
 
+// The two range tables below are GENERATED UCD data, not hand-written logic.
+// Their correctness is pinned by the SSOT round-trip in
+// test/joining-type.test.mjs (re-derive from the vendored slices, then assert
+// every covered code point and range boundary matches) — a far stronger and
+// faster guard than mutation. Mutating ~550 numeric literals is pathologically
+// slow (the shard was cancelled at ~19 min) and redundant, so Stryker skips
+// them; the lookup logic below is still mutated normally.
+// Stryker disable all
 // [start, end, Joining_Type] sorted by start, non-overlapping. Types present:
 // C (join-causing), D (dual), R (right), L (left), T (transparent). Any code
 // point absent here has Joining_Type U (non-joining) — the default.
@@ -137,6 +145,7 @@ ${joining.map(row).join("\n")}
 const VIRAMA_RANGES = [
 ${virama.map(row).join("\n")}
 ];
+// Stryker restore all
 
 /**
  * Binary search: the tag of the range containing \`cp\`, or \`fallback\`.
