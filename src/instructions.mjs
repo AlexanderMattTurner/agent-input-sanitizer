@@ -25,76 +25,10 @@ import { randomBytes } from "node:crypto";
 import { join, relative, resolve, isAbsolute, dirname, sep } from "node:path";
 import {
   LONG_RUN_RE,
-  STRIP,
   SCATTERED_THRESHOLD,
+  countPayloadInvisible,
   stripInvisible,
 } from "./invisible.mjs";
-
-// Emoji carve-out for the scatter floor, mirroring src/invisible.mjs. A
-// STRIP-class code point that is genuinely part of a VISIBLE emoji is not a
-// hidden channel and must not count toward the scattered-invisible
-// threshold-evasion floor, or an emoji-dense but benign document trips a false
-// positive (alert fatigue). Two such cases:
-//   - U+FE0F (VS16) directly after an Extended_Pictographic/Emoji_Modifier: a
-//     presentation selector on a real glyph (❤️), not a variation-selector run.
-//   - U+200D (ZWJ) joining two pictograph components (🏳️‍🌈): the joiner of an
-//     emoji ZWJ sequence, not a zero-width payload.
-// Anything NOT in an emoji context still counts, so a genuine selector/joiner
-// run keeps firing — precision preserved, recall on real payloads unchanged.
-const EMOJI_LEFT = /[\p{Extended_Pictographic}\p{Emoji_Modifier}]/u;
-const EMOJI_BASE = /\p{Extended_Pictographic}/u;
-const VARIATION_SELECTOR = new RegExp(
-  `[${[
-    ...Array.from({ length: 16 }, (_, i) => 0xfe00 + i),
-    ...Array.from({ length: 240 }, (_, i) => 0xe0100 + i),
-  ]
-    .map((c) => String.fromCodePoint(c))
-    .join("")}]`,
-  "u",
-);
-const VS16 = 0xfe0f;
-const ZWJ = 0x200d;
-
-/**
- * The nearest code point left of `i` that is not a variation selector, or "" at
- * the start. An emoji ZWJ sequence can place a VS16 between the base pictograph
- * and the ZWJ (🏳️‍🌈), so the joiner's real left neighbor is found by stepping over
- * any selector(s). Mirrors leftNonSelector in invisible.mjs.
- * @param {string[]} cps
- * @param {number} i
- * @returns {string}
- */
-function leftNonSelector(cps, i) {
-  let p = i - 1;
-  while (p >= 0 && VARIATION_SELECTOR.test(cps[p])) p--;
-  return cps[p] ?? "";
-}
-
-/**
- * Count invisible (STRIP-class) code points in `content` that are NOT part of a
- * visible emoji — the input to the scatter floor. A VS16 on a real pictograph
- * and an emoji-sequence ZWJ are discounted (see the carve-out note above); every
- * other STRIP-class char counts. Iterates by code point so an astral pictograph
- * neighbor is recognized as one unit.
- * @param {string} content
- * @returns {number}
- */
-function countInvisibleForScatter(content) {
-  const single = new RegExp(STRIP.source, "u");
-  const cps = [...content];
-  let count = 0;
-  for (let i = 0; i < cps.length; i++) {
-    if (!single.test(cps[i])) continue;
-    const cp = cps[i].codePointAt(0);
-    const isEmojiSelector = cp === VS16 && EMOJI_LEFT.test(cps[i - 1] ?? "");
-    const isEmojiJoiner =
-      cp === ZWJ &&
-      EMOJI_LEFT.test(leftNonSelector(cps, i)) &&
-      EMOJI_BASE.test(cps[i + 1] ?? "");
-    if (!isEmojiSelector && !isEmojiJoiner) count++;
-  }
-  return count;
-}
 
 /**
  * Decode a run of invisible characters to its likely payload. Recognizes the
@@ -185,20 +119,26 @@ export function scanText(content) {
 
   // Threshold-evasion: scattered invisible chars not in a long run can still be
   // a payload. Always evaluated; chars already in a run are excluded so they
-  // aren't double-counted. Emoji presentation selectors (U+FE0F on a real
-  // pictograph) are discounted so an emoji-dense benign doc doesn't over-fire.
+  // aren't double-counted. countPayloadInvisible is invisible.mjs's carve-out
+  // counter (the SSOT the stripper itself gates on): it discounts every
+  // invisible that does real rendering work — emoji presentation selectors
+  // (VS16 *and* VS15) on a real pictograph, emoji-sequence ZWJ, and linguistic
+  // ZWNJ/ZWJ between cursive letters or after a virama. A hand-rolled emoji-only
+  // mirror lived here before and over-counted linguistic joiners and VS15, so a
+  // ZWNJ-dense Persian doc or a doc of text-presentation hearts (❤︎) tripped a
+  // scattered false positive on content stripInvisible would preserve.
   //
-  // Asymmetry (deliberate, benign): the minuend discounts emoji selectors/joiners
-  // EVERYWHERE, while `runChars` is each run's RAW length. A long run is
-  // ≥LONG_RUN_THRESHOLD *consecutive* invisibles, and an emoji selector/joiner is
-  // always flanked by a visible pictograph — so it cannot sit inside such a run,
-  // and the two counts describe disjoint chars in practice. In the pathological
-  // case that they don't (e.g. a run of stacked VS16), the raw `runChars`
-  // subtracts at most a few more than the minuend added, biasing `scattered`
-  // slightly LOW — a false negative, the precision-favoring direction, never a
-  // spurious finding. `scattered` may even go negative; the `>=` gate treats that
-  // as "no scatter", which is correct.
-  const scattered = countInvisibleForScatter(content) - runChars;
+  // Asymmetry (deliberate, benign): the minuend discounts preserved
+  // selectors/joiners EVERYWHERE, while `runChars` is each run's RAW length. A
+  // long run is ≥LONG_RUN_THRESHOLD *consecutive* invisibles, and a preserved
+  // selector/joiner is always flanked by a visible neighbor — so it cannot sit
+  // inside such a run, and the two counts describe disjoint chars in practice.
+  // In the pathological case that they don't (e.g. a run of stacked VS16), the
+  // raw `runChars` subtracts at most a few more than the minuend added, biasing
+  // `scattered` slightly LOW — a false negative, the precision-favoring
+  // direction, never a spurious finding. `scattered` may even go negative; the
+  // `>=` gate treats that as "no scatter", which is correct.
+  const scattered = countPayloadInvisible(content) - runChars;
   if (scattered >= SCATTERED_THRESHOLD) {
     findings.push({
       line: 0,
