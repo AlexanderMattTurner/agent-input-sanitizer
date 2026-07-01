@@ -162,11 +162,23 @@ const NAMED_COLORS = {
 };
 
 /**
+ * True when a canonicalized color is a concrete value we can compare for
+ * equality — a resolved `#rrggbb` hex or `transparent`. `var(--x)`/`inherit`/
+ * `currentColor` canonicalize to their raw token and are NOT concrete: their
+ * effective color depends on the cascade, so a same-color hide can't be proven.
+ * @param {string} canonical
+ * @returns {boolean}
+ */
+function isConcreteColor(canonical) {
+  return canonical === "transparent" || /^#[0-9a-f]{6}$/.test(canonical);
+}
+
+/**
  * Canonicalize a CSS color to lowercase `#rrggbb` so `white`, `#FFF`,
  * `#ffffff`, and `rgb(255, 255, 255)` all compare equal. Returns the trimmed
- * lowercased input unchanged when it is not a form we recognize (so two
- * identical unknown notations still compare equal, and a mismatch never
- * falsely reads as same-color).
+ * lowercased input unchanged when it is not a form we recognize; callers gate
+ * the same-color compare on isConcreteColor so an unresolved token (`var()`,
+ * `inherit`) never falsely reads as a same-color hide.
  * @param {string} raw
  * @returns {string}
  */
@@ -294,9 +306,13 @@ export function isHiddenStyle(styleStr) {
   const background =
     canonicalizeColor(val("background-color")) ||
     backgroundColor(val("background"));
-  // Require a real (non-empty) canonical color on both sides: two empty values
-  // are equal, so without this an unstyled element would read as hidden.
-  if (color && background && color === background) return true;
+  // Only flag same-color when BOTH sides resolve to a concrete color (`#rrggbb`
+  // or `transparent`). `var(--x)`, `inherit`, and `currentColor` canonicalize to
+  // their raw token, so two identical unresolved tokens (e.g. the ubiquitous
+  // `color:var(--fg);background:var(--fg)` or `color:inherit;background:inherit`,
+  // which resolve to DIFFERENT effective colors) would otherwise read as hidden
+  // and splice out visible text. Fail open on anything we can't resolve.
+  if (color && color === background && isConcreteColor(color)) return true;
 
   return isOverflowHidden(val);
 }

@@ -153,6 +153,11 @@ const HIDDEN_STYLE_CASES = [
   ["color:white;background-color:black", false],
   ["background-color:white", false], // color absent — not same-color
   ["color:rgb(0,0,0);background:rgb(255,255,255)", false],
+  // ── unresolved color tokens: can't prove same-color, so fail open ──
+  ["color:var(--fg);background-color:var(--fg)", false], // same var, but resolves via cascade — not provably equal
+  ["color:inherit;background:inherit", false], // inherit color != inherit background-color
+  ["color:currentColor;background-color:currentColor", false],
+  ["color:var(--fg);background:#fff", false], // one side unresolved
   // ── content-visibility ──
   ["content-visibility:hidden", true],
   ["content-visibility:auto", false], // perf hint; content stays visible
