@@ -79,8 +79,8 @@ def test_serve_one_malformed_json_body_closes():
 # ─── _bind_or_exit / _reclaim_stale_socket ───────────────────────────────────
 
 
-def test_reclaim_stale_socket_removes_dead_file(tmp_path):
-    socket_path = str(tmp_path / "s.sock")
+def test_reclaim_stale_socket_removes_dead_file(sock_dir):
+    socket_path = str(sock_dir / "s.sock")
     # A stale socket FILE with nobody listening: a leftover bind, then closed.
     dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     dead.bind(socket_path)
@@ -93,8 +93,8 @@ def test_reclaim_stale_socket_removes_dead_file(tmp_path):
         sock.close()
 
 
-def test_bind_or_exit_returns_false_when_live_daemon_owns_path(tmp_path):
-    socket_path = str(tmp_path / "s.sock")
+def test_bind_or_exit_returns_false_when_live_daemon_owns_path(sock_dir):
+    socket_path = str(sock_dir / "s.sock")
     stop = threading.Event()
     thread = threading.Thread(target=S.serve, args=(socket_path, stop), daemon=True)
     thread.start()
@@ -116,11 +116,11 @@ def test_bind_or_exit_returns_false_when_live_daemon_owns_path(tmp_path):
         thread.join(timeout=5)
 
 
-def test_bind_or_exit_reraises_non_addrinuse(tmp_path):
+def test_bind_or_exit_reraises_non_addrinuse(sock_dir):
     # A bind error that is NOT EADDRINUSE (here ENOENT: the parent directory does
     # not exist) must propagate, not be swallowed as a stale-socket case.
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    missing = str(tmp_path / "no_such_dir" / "s.sock")
+    missing = str(sock_dir / "no_such_dir" / "s.sock")
     try:
         with pytest.raises(OSError):
             S._bind_or_exit(sock, missing)
@@ -138,8 +138,8 @@ def test_main_usage_error_on_wrong_argc():
         S.main(["a", "b"])
 
 
-def test_main_serves_until_stopped(tmp_path, monkeypatch):
-    socket_path = str(tmp_path / "s.sock")
+def test_main_serves_until_stopped(sock_dir, monkeypatch):
+    socket_path = str(sock_dir / "s.sock")
     called = {}
 
     def _fake_serve(path):
@@ -150,8 +150,8 @@ def test_main_serves_until_stopped(tmp_path, monkeypatch):
     assert called["path"] == socket_path
 
 
-def test_serve_creates_socket_dir_with_mode(tmp_path):
-    nested = tmp_path / "sub" / "dir"
+def test_serve_creates_socket_dir_with_mode(sock_dir):
+    nested = sock_dir / "sub" / "dir"
     socket_path = str(nested / "s.sock")
     stop = threading.Event()
     thread = threading.Thread(target=S.serve, args=(socket_path, stop), daemon=True)

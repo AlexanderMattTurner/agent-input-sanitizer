@@ -98,8 +98,8 @@ def _client_request(socket_path: str, request: dict) -> object:
 
 
 @pytest.fixture
-def daemon(tmp_path):
-    socket_path = str(tmp_path / "redactor.sock")
+def daemon(sock_dir):
+    socket_path = str(sock_dir / "redactor.sock")
     stop = threading.Event()
     thread = threading.Thread(target=S.serve, args=(socket_path, stop), daemon=True)
     thread.start()
