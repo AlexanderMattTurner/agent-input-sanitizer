@@ -242,6 +242,33 @@ describe("scanText", () => {
     assert.deepEqual(scanText(doc), []);
   });
 
+  it("does NOT flag a ZWNJ-dense benign Persian doc (linguistic joiners discounted)", () => {
+    // 30 words each carrying a ZWNJ between two cursive Arabic-script letters —
+    // ordinary formal Persian density. Pre-fix the scatter counter mirrored only
+    // the EMOJI carve-out, so every linguistic ZWNJ counted and 30 words tripped
+    // the "scattered invisible chars" finding on content stripInvisible
+    // preserves — a false positive. Zero findings required.
+    const word = `${cp(0x645)}${cp(0x6cc)}${cp(0x200c)}${cp(0x62e)}`;
+    const doc = Array.from({ length: 30 }, () => word).join(" ") + "\n";
+    assert.deepEqual(scanText(doc), []);
+  });
+
+  it("does NOT flag a doc dense with virama+ZWJ Devanagari half-forms", () => {
+    // क् + ZWJ + ष: the joiner immediately after a virama requests a half-form —
+    // real rendering work, discounted like the Persian ZWNJ above.
+    const conjunct = `${cp(0x915)}${cp(0x94d)}${cp(0x200d)}${cp(0x937)}`;
+    const doc = Array.from({ length: 30 }, () => conjunct).join(" ") + "\n";
+    assert.deepEqual(scanText(doc), []);
+  });
+
+  it("does NOT flag a doc dense with text-presentation (VS15) hearts", () => {
+    // ❤︎ = U+2764 + VS15 (U+FE0E). Pre-fix only VS16 was discounted, so 30
+    // text-presentation selectors on real pictographs tripped the scatter floor.
+    const heart = `${cp(0x2764)}${cp(0xfe0e)}`;
+    const doc = Array.from({ length: 30 }, () => heart).join("\n") + "\n";
+    assert.deepEqual(scanText(doc), []);
+  });
+
   it("STILL flags a genuine scattered VS16 run not anchored to pictographs", () => {
     // Precision guard: the discount is only for a VS16 immediately after a
     // pictograph/modifier. A run of VS16 selectors each preceded by an ordinary
