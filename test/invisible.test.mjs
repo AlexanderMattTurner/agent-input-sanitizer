@@ -267,16 +267,24 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     });
   }
 
-  it("preserves a standalone pictograph + VS16 with no ZWJ/ZWNJ anywhere in the document", () => {
-    // Regression: stripInvisibleWithReport used to route on "does the WHOLE
-    // document contain a ZWNJ/ZWJ" and fall back to a bulk strip (no emoji
-    // carve-out at all) when it didn't — so "I ❤️ pizza", which has a
-    // presentation selector but no joiner anywhere, had its selector stripped.
-    const sample = `I ${cp(0x2764)}${cp(0xfe0f)} pizza`;
-    const { cleaned, found } = stripInvisibleWithReport(sample);
-    assert.equal(cleaned, sample);
-    assert.deepEqual(found, []);
-  });
+  for (const [name, selector] of [
+    ["VS16 (emoji presentation)", cp(0xfe0f)],
+    ["VS15 (text presentation)", cp(0xfe0e)],
+  ]) {
+    it(`preserves a standalone pictograph + ${name} with no ZWJ/ZWNJ anywhere in the document`, () => {
+      // Regression: stripInvisibleWithReport used to route on "does the WHOLE
+      // document contain a ZWNJ/ZWJ" and fall back to a bulk strip (no
+      // presentation-selector carve-out at all) when it didn't — so "I ❤️
+      // pizza" / "I ❤︎ pizza", which have a selector but no joiner anywhere,
+      // had that selector stripped. Also regression for a narrower follow-up
+      // bug: the carve-out itself recognized only VS16, so VS15 was still
+      // stripped even once routed through it.
+      const sample = `I ${cp(0x2764)}${selector} pizza`;
+      const { cleaned, found } = stripInvisibleWithReport(sample);
+      assert.equal(cleaned, sample);
+      assert.deepEqual(found, []);
+    });
+  }
 
   it("keeps one emoji selector but strips a stuffed VS16 run", () => {
     // A real emoji keeps ONE selector after the pictograph; a run of them is a

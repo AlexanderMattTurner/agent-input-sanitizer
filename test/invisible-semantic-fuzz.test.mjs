@@ -43,8 +43,10 @@ const KEEP_TOKENS = [
   cp(0x2764) + cp(0xfe0f) + ZWJ + cp(0x1f525),
   // 👨🏻‍🦰 skin-tone modifier + ZWJ + component
   cp(0x1f468) + cp(0x1f3fb) + ZWJ + cp(0x1f9b0),
-  // ❤️ a single pictograph + presentation selector, no joiner at all
+  // ❤️ a single pictograph + emoji presentation selector, no joiner at all
   cp(0x2764) + cp(0xfe0f),
+  // ❤︎ the same pictograph with the TEXT presentation selector (VS15)
+  cp(0x2764) + cp(0xfe0e),
   // "می‌خ" — ZWNJ between Persian (Arabic-script) letters
   cp(0x645) + cp(0x6cc) + ZWNJ + cp(0x62e),
   // "क्‍ष" — ZWJ after a Devanagari virama

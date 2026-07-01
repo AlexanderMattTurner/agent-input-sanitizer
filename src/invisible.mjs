@@ -233,9 +233,10 @@ const EMOJI_BASE = /\p{Extended_Pictographic}/u;
 // following ZWJ (🏳️‍🌈 = flag base, VS16, ZWJ, rainbow; 👁️‍🗨️), so the joiner's real
 // left neighbor for the emoji test is the pictograph, not the selector.
 const VARIATION_SELECTOR = new RegExp(`[${VS}]`, "u");
-// U+FE0F forces emoji (vs text) presentation; a single one directly after a
-// pictograph is part of a visible emoji, not a hidden variation-selector run.
-const EMOJI_PRESENTATION_SELECTOR = 0xfe0f;
+// U+FE0F (VS16) forces emoji presentation, U+FE0E (VS15) forces text
+// presentation (☺︎ vs ☺); either one directly after a pictograph is part of a
+// visible glyph, not a hidden variation-selector run.
+const PRESENTATION_SELECTORS = new Set([0xfe0e, 0xfe0f]);
 
 // Non-global single-char classifiers (CHECKS carry `g`, whose lastIndex is
 // stateful across `.test`). carveStrip uses these to attribute each removed
@@ -327,16 +328,17 @@ function isPreservedJoiner(cps, i) {
 }
 
 /**
- * True when `cps[i]` is an emoji presentation selector (U+FE0F) directly after a
- * pictograph/skin-tone modifier — part of a visible emoji, not a hidden VS run,
- * so it is preserved (a longer selector run still surfaces: the next selector's
- * left neighbour is itself a selector, not a pictograph).
+ * True when `cps[i]` is a presentation selector (VS15 U+FE0E or VS16 U+FE0F)
+ * directly after a pictograph/skin-tone modifier — part of a visible glyph,
+ * not a hidden VS run, so it is preserved (a longer selector run still
+ * surfaces: the next selector's left neighbour is itself a selector, not a
+ * pictograph).
  * @param {string[]} cps @param {number} i
  * @returns {boolean}
  */
 function isEmojiPresentationSelector(cps, i) {
   return (
-    cps[i].codePointAt(0) === EMOJI_PRESENTATION_SELECTOR &&
+    PRESENTATION_SELECTORS.has(/** @type {number} */ (cps[i].codePointAt(0))) &&
     EMOJI_LEFT.test(cps[i - 1] ?? "")
   );
 }
@@ -381,9 +383,10 @@ export function countPayloadInvisible(text) {
 }
 
 /**
- * Bulk strip (the common path: no ZWNJ/ZWJ present, so no carve-out can apply).
- * A single regex pass removes every payload-capable char; `found` names the
- * category codes present via `.search` (which ignores the `g` lastIndex).
+ * Bulk strip (the common path: {@link needsCarveOut} found nothing the
+ * carve-out could apply to). A single regex pass removes every payload-
+ * capable char; `found` names the category codes present via `.search`
+ * (which ignores the `g` lastIndex).
  * @param {string} body
  * @returns {{ cleaned: string, found: string[] }}
  */
@@ -482,11 +485,12 @@ function carveStrip(body) {
 }
 
 /**
- * True when `body` holds at least one ZWNJ/ZWJ or emoji presentation selector
- * (U+FE0F) — anything the carve-out in {@link carveStrip} might preserve. A
- * lone pictograph + U+FE0F with no joiner ANYWHERE else in the document (e.g.
- * "I ❤️ pizza") still needs the carve-out's per-neighbor analysis, or bulkStrip
- * strips the selector unconditionally and corrupts a legitimate emoji.
+ * True when `body` holds at least one ZWNJ/ZWJ or presentation selector
+ * (VS15 U+FE0E / VS16 U+FE0F) — anything the carve-out in {@link carveStrip}
+ * might preserve. A lone pictograph + selector with no joiner ANYWHERE else in
+ * the document (e.g. "I ❤️ pizza" or "I ❤︎ pizza") still needs the carve-out's
+ * per-neighbor analysis, or bulkStrip strips the selector unconditionally and
+ * corrupts a legitimate glyph.
  * @param {string} body
  * @returns {boolean}
  */
@@ -494,7 +498,9 @@ function needsCarveOut(body) {
   return (
     body.includes(String.fromCodePoint(ZWNJ)) ||
     body.includes(String.fromCodePoint(ZWJ)) ||
-    body.includes(String.fromCodePoint(EMOJI_PRESENTATION_SELECTOR))
+    [...PRESENTATION_SELECTORS].some((cp) =>
+      body.includes(String.fromCodePoint(cp)),
+    )
   );
 }
 
