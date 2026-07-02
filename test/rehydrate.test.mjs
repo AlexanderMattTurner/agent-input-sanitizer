@@ -740,7 +740,11 @@ describe("rehydrate: stripped-character re-anchoring", () => {
   });
 
   it("denies a purely-invisible alignment collision the re-clean check misses", async () => {
-    const content = `${ESC}${ESC}[3${ZW}2m[32m\n`;
+    // A complete, real "[32m" SGR sequence is fully stripped (its raw bytes
+    // still contain the literal "[32m" substring), while a second, ZW-spliced
+    // "[3<ZW>2m" as plain text re-cleans to the sole view occurrence of
+    // "[32m" — the disk collision is invisible to the re-clean check (a).
+    const content = `${ESC}[32mX [3${ZW}2m\n`;
     const out = await rehydrateRedacted(
       "Edit",
       { file_path: "/f", old_string: "[32m", new_string: "[32m\nEXTRA=1" },
