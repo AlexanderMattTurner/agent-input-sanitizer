@@ -15,3 +15,7 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "drift_guard: SSOT drift-guard contract tests that must never be silently skipped",
+]
+addopts = "--strict-markers"
