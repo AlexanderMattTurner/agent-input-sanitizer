@@ -242,7 +242,9 @@ def test_stalled_connection_does_not_block_the_daemon(sock_dir, monkeypatch):
         assert "AWS Access Key" in result["found"]
         # Bounded by roughly CONN_TIMEOUT_SECONDS (the stalled connection ahead
         # of it in accept order), never by an unbounded hang.
-        assert elapsed < 3, f"a stalled peer must not block a fresh request ({elapsed}s)"
+        assert elapsed < 3, (
+            f"a stalled peer must not block a fresh request ({elapsed}s)"
+        )
     finally:
         stalled.close()
         fresh.close()
