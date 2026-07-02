@@ -172,26 +172,35 @@ function isContained(realRoot, realChild) {
 
 /**
  * Classify a glob match for containment: resolve it to a real (symlink-
- * followed) path and decide whether to keep, drop, or reject it. Two failure
- * modes are kept distinct:
+ * followed) path and decide whether to keep, drop, or reject it. Three
+ * outcomes are kept distinct:
  *
- *   - The realpath ESCAPES `realRoot` → THROW. A scanner pointed outside its
- *     own tree is a caller misconfiguration that must surface loudly, not a
- *     file silently skipped while the caller believes it was scanned.
+ *   - The realpath is contained in `realRoot` → KEEP.
+ *   - The match is contained LEXICALLY (the glob pattern itself, followed
+ *     literally with no symlink resolution, never leaves `literalRoot`) but its
+ *     REALPATH escapes `realRoot` — an in-tree symlink (e.g. a planted
+ *     `CLAUDE.md -> /etc/passwd`) whose target lives outside the tree → SKIP.
+ *     One planted symlink must not abort scanning every other instruction
+ *     file; treat it like the existing dangling-symlink case.
+ *   - The match ESCAPES LEXICALLY — the glob pattern itself reaches outside
+ *     `literalRoot` via `..` or an absolute path outside the tree, with no
+ *     symlink involved → THROW. That is a caller misconfiguration (a scanner
+ *     pointed outside its own tree) that must surface loudly, not be silently
+ *     skipped.
  *   - The path cannot be resolved at all (ENOENT/EACCES — a dangling symlink or
  *     unreadable entry that still lives inside the tree) → return false to SKIP
  *     it, matching scanInstructionFiles' existing skip-on-unreadable behavior.
- *     A stale symlink in a project must not abort scanning every other file.
  *
  * A genuine resolution failure is never allowed to masquerade as a
  * containment pass: an unresolvable path is skipped, only a successfully
- * resolved in-tree path returns true.
+ * resolved path is classified as kept/skipped/thrown above.
  * @param {string} absPath  absolute path to a glob match
  * @param {string} realRoot  realpath of the scan root
+ * @param {string} literalRoot  `cwd`, resolved but NOT symlink-followed
  * @param {string} pattern  the glob that produced this match
- * @returns {boolean} true to keep the match, false to skip an unresolvable one
+ * @returns {boolean} true to keep the match, false to skip it
  */
-function keepContained(absPath, realRoot, pattern) {
+function keepContained(absPath, realRoot, literalRoot, pattern) {
   let real;
   try {
     real = realpathSync(absPath);
@@ -199,6 +208,10 @@ function keepContained(absPath, realRoot, pattern) {
     return false; // dangling/unreadable in-cwd match: skip, do not abort
   }
   if (isContained(realRoot, real)) return true;
+  // The glob pattern itself never left the scan root lexically, so the escape
+  // is caused by an in-tree symlink resolving outside the tree, not by the
+  // caller's glob configuration. Skip this one match, do not abort the scan.
+  if (isContained(literalRoot, absPath)) return false;
   throw new Error(
     `instruction-file path escapes scan root: pattern ${JSON.stringify(
       pattern,
@@ -213,17 +226,20 @@ function keepContained(absPath, realRoot, pattern) {
  * `node_modules`. The glob set is the caller's instruction-file convention.
  *
  * Containment is enforced per match (see {@link keepContained}): a match whose
- * realpath escapes `cwd` — via `..`, an absolute-path glob, or a symlink
- * pointing outside — THROWS, since reaching outside the tree is a caller
- * misconfiguration. A match that simply cannot be resolved (a dangling symlink
- * or unreadable entry inside the tree) is SKIPPED, so one stale symlink never
- * aborts scanning the rest of the project.
+ * glob pattern itself escapes `cwd` — via `..` or an absolute-path glob
+ * outside the tree — THROWS, since reaching outside the tree is a caller
+ * misconfiguration. A match that lexically stays inside `cwd` but resolves
+ * (via an in-tree symlink) to a target outside the tree, or that simply
+ * cannot be resolved (a dangling symlink or unreadable entry inside the
+ * tree), is SKIPPED, so one bad symlink never aborts scanning the rest of the
+ * project.
  * @param {string[]} globs
  * @param {{ cwd?: string }} [options]
  * @returns {string[]}
  */
 export function findInstructionFiles(globs, { cwd = process.cwd() } = {}) {
-  const realRoot = realpathSync(resolve(cwd));
+  const literalRoot = resolve(cwd);
+  const realRoot = realpathSync(literalRoot);
   const seen = new Set();
   for (const pattern of globs)
     for (const name of globSync(pattern, {
@@ -234,7 +250,8 @@ export function findInstructionFiles(globs, { cwd = process.cwd() } = {}) {
       // cwd-relative names otherwise; joining an already-absolute name would
       // double the prefix into a nonexistent path (the absolute-glob miss bug).
       const absPath = isAbsolute(name) ? name : join(cwd, name);
-      if (keepContained(absPath, realRoot, pattern)) seen.add(absPath);
+      if (keepContained(absPath, realRoot, literalRoot, pattern))
+        seen.add(absPath);
     }
   return [...seen];
 }
