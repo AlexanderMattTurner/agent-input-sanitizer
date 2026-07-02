@@ -25,6 +25,12 @@ permissions:
 
 jobs:
   build:
+    # Recovery-only: publishes to PyPI via OIDC trusted publishing (no rotatable
+    # secret to scope this down), so any actor with workflow_dispatch permission
+    # could otherwise publish an unreviewed branch as the official tagged
+    # release. Restrict to main so a non-main dispatch fails fast and visibly
+    # instead of silently publishing.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -41,12 +47,12 @@ jobs:
       - name: Set up Node.js
         # No `cache:` input, so this does not restore a dependency cache — the
         # cache-poisoning surface zizmor warns about generically is not present.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4 # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: "22"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Install Node dependencies
         run: pnpm install
@@ -86,6 +92,7 @@ jobs:
 
   publish:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # id-token is scoped to this job only (least privilege): the OIDC token that
