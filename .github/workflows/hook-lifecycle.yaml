@@ -15,6 +15,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".pre-commit-config.yaml"
+      - ".github/actions/setup-base-env/action.yaml"
       - ".github/scripts/run-hook-lifecycle.sh"
       - ".github/workflows/hook-lifecycle.yaml"
   # No paths filter on pull_request: a workflow-level filter skips the whole

@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/**
+      - .github/scripts/sync-required-checks.sh
       - .pre-commit-config.yaml
   workflow_dispatch:
     inputs:

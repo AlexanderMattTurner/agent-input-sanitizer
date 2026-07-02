@@ -7,7 +7,9 @@ on:
       - "src/**"
       - "bin/**"
       - "package.json"
+      - "pnpm-lock.yaml"
       - "tsconfig*.json"
+      - ".github/actions/setup-base-env/action.yaml"
       - ".github/scripts/pack-smoke.sh"
       - ".github/workflows/pack-smoke.yaml"
   # No paths filter on pull_request: this is a Required check, and a workflow-level
