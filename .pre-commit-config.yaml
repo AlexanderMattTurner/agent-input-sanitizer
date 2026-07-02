@@ -56,7 +56,7 @@ repos:
   # applies here with no config change; check-symlinks is the one hook outside
   # any tier, so it stays listed.
   - repo: https://github.com/alexander-turner/ci-truth-serum
-    rev: 421e708a4fa98df667c708fdb4c43570ab620bb6 # main (no tagged release yet)
+    rev: e438c361e232fa2f69ab36ff9a29a1e639e0c5a7 # main
     hooks:
       - id: check-tier1
       - id: check-tier2
