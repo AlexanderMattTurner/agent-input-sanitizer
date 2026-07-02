@@ -48,9 +48,10 @@ cannot see:
 
 - `<!-- HTML comments -->`
 - elements hidden by inline style: `display:none`, `visibility:hidden`,
-  `opacity:0`, off-screen positioning, zero/negative sizes, `text-indent`
-  off-screen, collapsing `clip`/`clip-path`/`transform:scale(0)`, white-on-white
-  / transparent text, `overflow:hidden` with a zero dimension
+  `content-visibility:hidden`, `opacity:0`, `filter:opacity(0)`, off-screen
+  positioning, zero/negative sizes, `text-indent` off-screen, collapsing
+  `clip`/`clip-path`/`transform:scale(0)`, white-on-white / transparent text,
+  `overflow:hidden` with a zero dimension
 - elements hidden by attribute: `hidden`, `aria-hidden="true"`
 
 Spliced ranges are replaced with a placeholder; **every byte outside a spliced
@@ -77,7 +78,7 @@ attributes (`src`/`href`/`background`/`srcset`/`ping`, form `action`/`formaction
 - off-origin form actions and `meta refresh` redirects
 - `javascript:` / `vbscript:` targets
 
-Each threat carries a `reason` and the destination `host` (never the
+Each threat carries a `reason` and the destination `target` (never the
 payload-bearing query/fragment), suitable for a warning shown to the operator.
 
 ## Confusable folding (tool input)
@@ -110,8 +111,10 @@ cannot rewrite the prompt in place, so the only neutralization is to block.
 One carve-out: a prompt whose only escape content is display-only SGR color
 passes with a note (pasting colored terminal output is the common case, and SGR
 cannot move the cursor, erase, or carry an OSC payload). The SGR-only test
-recognizes both the 7-bit (`ESC[…m`) and 8-bit C1 (`U+009B…m`) encodings, so a
-C1-introduced cursor-move or erase is never mistaken for benign color.
+gates on both the 7-bit ESC (`U+001B`) introducer and the whole 8-bit C1
+control block (U+0080–U+009F)—not just the CSI byte (`U+009B`)—so a
+C1-introduced cursor-move, erase, or OSC/DCS/SOS/PM/APC string is never
+mistaken for benign color.
 
 ## Tool-output pipeline & Layer 5
 
