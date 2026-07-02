@@ -23,7 +23,9 @@ import json
 import os
 import socket
 import struct
+import sys
 import threading
+import traceback
 
 from . import RedactorConfig, configure_plugins, handle_request
 from .engine import redact_configured
@@ -31,6 +33,18 @@ from .engine import redact_configured
 # Refuse absurd frames rather than buffer unbounded; the magnitude is arbitrary
 # (the cap *boundary* is what matters).
 FRAME_CAP = 16 * 1024 * 1024
+
+# Bound on a single ACCEPTED connection's I/O. The listen socket's own
+# `settimeout` only governs how often `accept()` re-checks `stop` — it does
+# nothing once a connection is accepted, and `_serve_one` is called inline in
+# the same accept-loop iteration. Without this, a client that opens a
+# connection and never finishes sending its frame (e.g. 3 of 4 header bytes)
+# blocks `_recv_exact` forever, which blocks the entire accept loop from ever
+# calling `accept()` again — one idle/slow/malicious local client wedges the
+# daemon for every other client sharing the socket. Long enough for a
+# legitimate large request over a local socket, short enough to bound the DoS
+# window.
+CONN_TIMEOUT_SECONDS = 10.0
 
 
 def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
@@ -78,7 +92,13 @@ def _request_config(req: dict) -> RedactorConfig:
     )
     return RedactorConfig(
         provider_vars=provider_vars,
-        web_ingress=bool(req.get("web_ingress", False)),
+        # Fail closed: this is a SHARED, UNAUTHENTICATED local socket, so a
+        # caller that forgets (or has a buggy client that omits) the flag must
+        # get the stronger, non-name-trusting heuristics — not the weaker
+        # local-output mode that skips redaction for anything that merely
+        # LOOKS like a benign cursor/path/metadata field by variable name.
+        # Callers opt into the weaker mode explicitly with `web_ingress: false`.
+        web_ingress=bool(req.get("web_ingress", True)),
     )
 
 
@@ -99,7 +119,11 @@ def _serve_one(conn: socket.socket) -> None:
             )
         except Exception:  # noqa: BLE001
             # A genuine detection failure for THIS request: signal the client so it
-            # fails THAT call closed, but keep the daemon alive.
+            # fails THAT call closed, but keep the daemon alive. Log the traceback
+            # server-side (never to the client) so a systematic fault — every
+            # request failing, not just one malformed one — is visible to
+            # whoever operates the daemon instead of silently discarded.
+            traceback.print_exc(file=sys.stderr)
             _write_frame(conn, {"error": "redaction failed"})
             return
         _write_frame(conn, result)
@@ -159,17 +183,35 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
     with a warm-up scan BEFORE binding, so a bound socket implies a ready daemon.
     ``stop`` is a graceful-shutdown seam for tests; production passes none.
     """
-    os.makedirs(os.path.dirname(socket_path) or ".", mode=0o700, exist_ok=True)
+    socket_dir = os.path.dirname(socket_path) or "."
+    os.makedirs(socket_dir, mode=0o700, exist_ok=True)
+    # `makedirs(..., mode=...)` only applies `mode` to a directory it actually
+    # CREATES — `exist_ok=True` silently accepts a pre-existing dir at ANY
+    # permission level, including world-writable (e.g. a shared /tmp subpath
+    # another local process claimed first). Enforce the mode unconditionally
+    # so a stale/attacker-seeded directory can't leave the socket reachable.
+    os.chmod(socket_dir, 0o700)
     with configure_plugins():
         redact_configured(
             "warm up the detect-secrets mapping cache", None, RedactorConfig()
         )
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        if not _bind_or_exit(sock, socket_path):
+        # `bind()` creates the socket file under the process's current umask;
+        # narrow the window between file creation and the explicit chmod below
+        # by restricting the umask for the bind call itself, so the socket is
+        # never briefly world/group-accessible on a permissive parent dir. The
+        # protocol is unauthenticated, so a connectable-but-not-yet-restricted
+        # socket is a real local privilege issue, not just cosmetic.
+        old_umask = os.umask(0o077)
+        try:
+            bound = _bind_or_exit(sock, socket_path)
+        finally:
+            os.umask(old_umask)
+        if not bound:
             sock.close()
             return
         try:
-            os.chmod(socket_path, 0o600)
+            os.chmod(socket_path, 0o600)  # defense-in-depth; harmless if redundant
             sock.listen(64)
             sock.settimeout(0.5)
             while not (stop is not None and stop.is_set()):
@@ -177,6 +219,10 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
                     conn, _ = sock.accept()
                 except TimeoutError:
                     continue
+                # Bound THIS connection's I/O; see CONN_TIMEOUT_SECONDS docstring.
+                # `_serve_one` is called inline (synchronously) below, so without
+                # this a stalled peer wedges the whole accept loop.
+                conn.settimeout(CONN_TIMEOUT_SECONDS)
                 _serve_one(conn)
         finally:
             sock.close()
@@ -186,8 +232,6 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     """CLI: ``agent-secret-redactor-daemon <socket-path>``."""
-    import sys
-
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1:
         raise SystemExit("usage: agent-secret-redactor-daemon <socket-path>")
