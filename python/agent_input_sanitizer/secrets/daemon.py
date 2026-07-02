@@ -23,7 +23,9 @@ import json
 import os
 import socket
 import struct
+import sys
 import threading
+import traceback
 
 from . import RedactorConfig, configure_plugins, handle_request
 from .engine import redact_configured
@@ -111,7 +113,11 @@ def _serve_one(conn: socket.socket) -> None:
             )
         except Exception:  # noqa: BLE001
             # A genuine detection failure for THIS request: signal the client so it
-            # fails THAT call closed, but keep the daemon alive.
+            # fails THAT call closed, but keep the daemon alive. Log the traceback
+            # server-side (never to the client) so a systematic fault — every
+            # request failing, not just one malformed one — is visible to
+            # whoever operates the daemon instead of silently discarded.
+            traceback.print_exc(file=sys.stderr)
             _write_frame(conn, {"error": "redaction failed"})
             return
         _write_frame(conn, result)
@@ -220,8 +226,6 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     """CLI: ``agent-secret-redactor-daemon <socket-path>``."""
-    import sys
-
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1:
         raise SystemExit("usage: agent-secret-redactor-daemon <socket-path>")

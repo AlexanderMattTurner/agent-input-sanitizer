@@ -64,6 +64,23 @@ def test_serve_one_engine_failure_writes_error(monkeypatch):
         a.close()
 
 
+def test_serve_one_engine_failure_logs_traceback_to_stderr(monkeypatch, capsys):
+    def _boom(*a, **k):
+        raise RuntimeError("detection blew up")
+
+    monkeypatch.setattr(S, "handle_request", _boom)
+    a, b = socket.socketpair()
+    try:
+        body = json.dumps({"text": "key: AKIAIOSFODNN7EXAMPLE"}).encode("utf-8")
+        a.sendall(struct.pack(">I", len(body)) + body)
+        S._serve_one(b)
+        _drain(a)  # the client-facing response is asserted separately above
+    finally:
+        a.close()
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err and "detection blew up" in err
+
+
 def test_serve_one_malformed_json_body_closes():
     a, b = socket.socketpair()
     try:
