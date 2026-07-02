@@ -51,7 +51,7 @@ for file in "$@"; do
   fi
 
   # Extract frontmatter (between first and second ---), filtering YAML comments
-  frontmatter=$(awk '/^---$/{n++; next} n==1' "$file" | grep -v '^#')
+  frontmatter=$(awk '/^---$/{n++; next} n==1 && !/^#/' "$file")
 
   # Check frontmatter has name field
   if ! echo "$frontmatter" | grep -q '^name:'; then

@@ -31,7 +31,7 @@ if git diff --quiet; then
   exit 1
 fi
 
-git add -A
+git diff --name-only -z | xargs -0 git add --
 git commit --no-verify -m "style: auto-fix pre-commit issues"
 echo "pre-push: auto-fixed and committed pre-commit issues — re-run 'git push'." >&2
 exit 1
