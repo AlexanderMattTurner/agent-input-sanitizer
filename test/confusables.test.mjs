@@ -403,6 +403,20 @@ describe("normalizeConfusables: null cases", () => {
     );
   });
 
+  // An MCP tool name is attacker/third-party influenced. `fields` (typically
+  // DEFAULT_FIELDS) is a plain object literal, so a tool literally named
+  // "constructor" etc. resolves through Object.prototype to a truthy builtin
+  // function — without an own-property guard, `keys.filter(...)` a few lines
+  // later throws `keys.filter is not a function` instead of returning null
+  // like any other unrecognized tool name.
+  for (const tool of ["constructor", "toString", "hasOwnProperty", "__proto__"])
+    it(`returns null (does not throw) for the Object.prototype-named tool "${tool}"`, () => {
+      assert.equal(
+        normalizeConfusables(tool, { command: `c${CYR_A}t` }, { scan }),
+        null,
+      );
+    });
+
   for (const [name, toolInput] of [
     ["null toolInput", null],
     ["undefined toolInput", undefined],

@@ -536,16 +536,43 @@ describe("symlink containment", () => {
     rmSync(outsideDir, { recursive: true, force: true });
   });
 
-  it("THROWS when a symlinked dir inside cwd resolves to a file outside cwd", () => {
+  it("SKIPS a symlinked dir inside cwd that resolves outside cwd, without aborting the scan", () => {
     // outsideDir/.claude/skills/evil/SKILL.md, reached via tmpDir/.claude -> outsideDir/.claude
     const outClaudeSkill = join(outsideDir, ".claude", "skills", "evil");
     mkdirSync(outClaudeSkill, { recursive: true });
     writeFileSync(join(outClaudeSkill, "SKILL.md"), "payload\n");
     symlinkSync(join(outsideDir, ".claude"), join(tmpDir, ".claude"), "dir");
+    // A legitimate instruction file sits alongside the escaping symlink; it
+    // must still be found and scanned even though the symlink is excluded.
+    writeFileSync(
+      join(tmpDir, "CLAUDE.md"),
+      `# h\n${tagChars("payload xyz123")}\n`,
+    );
+    const found = findInstructionFiles(GLOBS, { cwd: tmpDir });
+    assert.deepEqual(
+      found,
+      [join(tmpDir, "CLAUDE.md")],
+      "the escaping symlink is excluded, the real in-tree file is still found",
+    );
+    const out = scanInstructionFiles(GLOBS, { cwd: tmpDir });
+    assert.deepEqual(
+      out.map((e) => e.file),
+      ["CLAUDE.md"],
+      "one planted symlink must not abort scanning the rest of the project",
+    );
+    assert.equal(out[0].findings[0].decoded, "payload xyz123");
+  });
+
+  it("still THROWS for a literal `..`/absolute glob escape even alongside symlinks (unchanged)", () => {
+    // Sanity check that the lexical-escape THROW path (bug #1 above) is
+    // untouched by the symlink-target-escape SKIP path added for bug #2: a
+    // glob pattern that itself reaches outside cwd is still a caller
+    // misconfiguration, regardless of any symlink elsewhere in the tree.
+    writeFileSync(join(outsideDir, "secret.md"), "top secret\n");
+    const rel = join("..", `${outsideDir.split("/").pop()}`, "secret.md");
     assert.throws(
-      () => findInstructionFiles(GLOBS, { cwd: tmpDir }),
+      () => findInstructionFiles([rel], { cwd: tmpDir }),
       /escapes scan root/,
-      "a symlinked dir escaping cwd must be caught by the realpath check",
     );
   });
 

@@ -166,7 +166,7 @@ export function normalizeConfusables(
   toolInput,
   { scan, fields = DEFAULT_FIELDS },
 ) {
-  const keys = fields[tool];
+  const keys = Object.hasOwn(fields, tool) ? fields[tool] : undefined;
   if (!keys || toolInput === null || toolInput === undefined) return null;
 
   // ASCII fast-path: only a field carrying a non-ASCII code unit can hold a
