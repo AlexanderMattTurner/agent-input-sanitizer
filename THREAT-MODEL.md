@@ -145,11 +145,18 @@ are load-bearing and **fail closed**:
   run abuts kept text it resembles; any call that does not re-clean back to the
   span’s view, matches multiple view locations, or cuts through a placeholder is
   **denied** with an instructive reason rather than edited at a guessed anchor.
-- **Never expose a secret.** Before rewriting, the would-be post-edit content is
-  re-sanitized (Layer 1 + the injected redactor); if any rehydrated secret would
-  survive in the model’s next view (e.g. an edit that relabels a field the
-  redactor no longer recognizes), the call is **denied**. The secret flows
-  disk → tool input only; the model’s next view is sanitized again.
+- **Never expose a secret this call rehydrated.** Before rewriting, the
+  would-be post-edit content is re-sanitized (Layer 1 + the injected
+  redactor); if any secret THIS EDIT resolved from a placeholder would survive
+  in the model’s next view (e.g. an edit whose `old_string`/`new_string`
+  carries a placeholder and relabels a field the redactor no longer
+  recognizes), the call is **denied**. This check only runs when the edit
+  touches a placeholder — a relabel that never names one (e.g. `password=` →
+  `notes=` with no `[REDACTED…]` in either string) is an accepted scope gap,
+  not covered here: simulating full-file exposure on every relabel-adjacent
+  edit would re-run redaction on every `Edit` call and risk false denials on a
+  legitimate relabel in a large file. The secret flows disk → tool input only;
+  the model’s next view is sanitized again.
 
 File access and the redactor are injected via `io`; the package performs no I/O
 of its own and bundles no secret engine.

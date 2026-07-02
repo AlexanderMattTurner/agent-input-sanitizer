@@ -18,19 +18,35 @@
  * outside the span are preserved untouched. The secret flows disk → tool input
  * only; the model's next view is sanitized again.
  *
- * Security invariant: rehydration must never *expose* a secret. Before
- * rewriting, the would-be post-edit content is re-sanitized and the call is
- * denied if any rehydrated secret would survive in the model's next view of
- * the file (e.g. an edit that relabels `password=` to a field the redactor
- * skips). Every unresolvable case fails closed as a deny whose reason tells the
- * model how to restructure the call; nothing is ever silently written with
- * placeholder text standing in for a secret.
+ * Security invariant: rehydration must never *expose a secret this call
+ * rehydrated*. Before rewriting, the would-be post-edit content is
+ * re-sanitized and the call is denied if any secret THIS EDIT resolved from a
+ * placeholder would survive in the model's next view of the file (e.g. an
+ * edit whose old_string/new_string carries a `[REDACTED…]` placeholder and
+ * relabels `password=` to a field the redactor skips).
+ *
+ * Scope: this check only runs for edits that touch a placeholder. An edit
+ * that relabels a field WITHOUT altering its placeholder or value at all
+ * (e.g. old_string: "password=", new_string: "notes=" — neither string
+ * contains a placeholder) never reaches the exposure simulation; see the
+ * early-exit comments near `rehydrateEdit`'s "span is byte-identical" check
+ * and `rehydrateRedacted`'s "hint-free, view matches disk" check below. That
+ * gap is an accepted scope limit, not an oversight: simulating full-file
+ * exposure on every relabel-adjacent edit would re-run redaction over the
+ * whole file on every Edit call, and a broader check risks false denials on a
+ * legitimate relabel in a large file — this module's fail-open-on-ambiguity
+ * doctrine prefers the false negative there. Catching a bare relabel (no
+ * placeholder touched) is the redactor's own field-name heuristics' job, if
+ * it has any — not this module's. Every unresolvable case this module DOES
+ * cover fails closed as a deny whose reason tells the model how to
+ * restructure the call; nothing this module rehydrates is ever silently
+ * written with placeholder text standing in for a secret.
  *
  * I/O is INJECTED through `io`: the caller supplies file reads and the secret
  * redactor (its map/plain contract). The package never bundles a redactor —
  * detect-secrets, a daemon, or any other engine is the caller's to wire.
  */
-import { applyLayer1 } from "./layer1.mjs";
+import { applyLayer1, LONE_SURROGATE_RE } from "./layer1.mjs";
 import {
   occurrences,
   alignDeletions,
@@ -65,10 +81,33 @@ export const DEFAULT_HINT = "[REDACTED";
  */
 
 /**
+ * Layer 1, then the same lone-surrogate normalization `output.mjs`'s
+ * `processLayer1` applies before any further layer (including redaction)
+ * runs — so text handed to the redactor here, and matched against the
+ * model's old_string, is byte-identical to what the model was actually
+ * shown. `layer1Cleaned` (pre-normalization) is also returned: callers that
+ * need `alignDeletions` require a true subsequence of the original text, and
+ * the normalization is a same-length SUBSTITUTION (one lone-surrogate UTF-16
+ * unit -> one U+FFFD unit), not a deletion — folding it into the deletion
+ * calculation would break that subsequence invariant. Because the
+ * substitution never changes length, deletions computed against
+ * `layer1Cleaned` stay position-valid against `cleaned`.
+ * @param {string} text
+ * @returns {{layer1Cleaned: string, cleaned: string}}
+ */
+function layer1View(text) {
+  const { cleaned: layer1Cleaned } = applyLayer1(text);
+  return {
+    layer1Cleaned,
+    cleaned: layer1Cleaned.replace(LONE_SURROGATE_RE, "\uFFFD"),
+  };
+}
+
+/**
  * Count of secrets the model's *next* sanitized view of `newContent` would
  * reveal, excluding any already visible in the prior view (no regression
- * there). The next view is Layer 1 then redaction, exactly as a PostToolUse
- * sanitizer derives it.
+ * there). The next view is Layer 1 (+ lone-surrogate normalization) then
+ * redaction, exactly as a PostToolUse sanitizer derives it.
  * @param {string[]} secrets rehydrated values written into newContent
  * @param {string} priorView sanitized view of the file before the change
  * @param {string} newContent would-be post-change file content
@@ -80,7 +119,7 @@ async function exposedSecrets(secrets, priorView, newContent, io) {
     (value) => !priorView.includes(value),
   );
   if (candidates.length === 0) return 0;
-  const { cleaned } = applyLayer1(newContent);
+  const { cleaned } = layer1View(newContent);
   const redacted = (await io.redact(cleaned)) ?? cleaned;
   return candidates.filter((value) => redacted.includes(value)).length;
 }
@@ -196,7 +235,7 @@ async function rehydrateEdit(
   //       text could equally well anchor there. Either way the anchor is
   //       ambiguous; fail closed rather than edit the wrong region.
   const anchorAmbiguous =
-    applyLayer1(span.diskText).cleaned !== span.cleanedText ||
+    layer1View(span.diskText).cleaned !== span.cleanedText ||
     (span.diskText !== oldS && content.includes(oldS));
   if (anchorAmbiguous)
     return {
@@ -215,6 +254,10 @@ async function rehydrateEdit(
 
   // The span is byte-identical to disk (no pairs, no interior runs): nothing
   // to translate. The empty-span resolver above already vetted new_string.
+  // No placeholder was touched, so this exit also skips the exposure
+  // simulation below — in scope per the module doc's "Security invariant"
+  // note: a relabel that never names a placeholder is an accepted gap, not
+  // covered here.
   if (span.diskText === oldS && newRes.text === ti.new_string) return null;
 
   // Simulate the post-edit content for the exposure check. When the disk
@@ -260,8 +303,21 @@ async function rehydrateWrite(ti, view, io, hint) {
   const texts = [...new Set(view.pairs.map((pair) => pair.placeholder))].filter(
     (phText) => ti.content.includes(phText),
   );
-  // None of the file's redaction placeholders appear: content is literal.
-  if (texts.length === 0) return null;
+  // None of THIS file's redaction placeholders appear in the new content.
+  // isCandidate already guaranteed ti.content contains the hint prefix (e.g.
+  // "[REDACTED"), so an empty `texts` here means the content carries a
+  // placeholder-shaped string that names a secret from a DIFFERENT file or
+  // context (or a stale/mistyped one) — not literal prose. Persisting it
+  // verbatim would silently write "[REDACTED:…]" into the file where the
+  // model likely intended an actual secret value; deny instead.
+  if (texts.length === 0)
+    return {
+      deny:
+        `the ${hint}…] placeholder in the new content does not match any secret in ` +
+        `${ti.file_path}, so a whole-file Write cannot copy a placeholder from another ` +
+        `file or context; request the source file's content and rehydrate a same-file ` +
+        `Edit instead, or write the secret's real value directly`,
+    };
 
   let out = ti.content;
   const secrets = [];
@@ -363,19 +419,50 @@ export async function rehydrateRedacted(
   let content;
   try {
     content = io.readFile(toolInput.file_path);
-  } catch {
-    // Missing/unreadable target: an Edit fails on its own; a Write creates a
-    // new file whose placeholder text can only be literal content.
-    return null;
+  } catch (err) {
+    // The catch binding is `unknown` under strict TS; io's contract only
+    // promises Node-shaped read failures (a real `readFile`'s throw), so
+    // narrow once here rather than re-deriving the cast at every use below.
+    const nodeErr = /** @type {NodeJS.ErrnoException} */ (err);
+    // ENOENT (missing target): an Edit fails on its own; a Write creates a
+    // new file whose placeholder text can only be literal content. Pass
+    // through — this is the only read failure that genuinely means "nothing
+    // real is at risk here."
+    if (nodeErr?.code === "ENOENT") return null;
+    // Any OTHER read failure (EACCES, EMFILE, a transient I/O error, …) means
+    // the target very likely still EXISTS with real bytes on disk — the read
+    // failed, the file didn't vanish. A hinted call's content may carry
+    // placeholder text that must never be persisted literally over whatever
+    // secret is actually there, so fail closed with a deny instead of the
+    // silent pass-through above. A non-hinted call was never going to write a
+    // secret-shaped placeholder either way, and the underlying tool call will
+    // hit this exact same read error itself, so let it propagate rather than
+    // swallow an unexpected failure.
+    if (!hinted) throw err;
+    return {
+      deny:
+        `could not read ${toolInput.file_path} to rehydrate its secrets ` +
+        `(${nodeErr?.code ?? nodeErr?.message}); the file likely still exists, so writing ` +
+        `the placeholder text as-is risks overwriting a real secret. Retry the read, or ` +
+        `ask the user to make this change directly`,
+    };
   }
-  const { cleaned } = applyLayer1(content);
+  const { layer1Cleaned, cleaned } = layer1View(content);
   // A Layer-1-clean file's view differs from disk only at placeholders, which
   // a hint-free old_string cannot touch: a verbatim match needs no
   // translation, and a mismatch is an ordinary stale old_string Edit should
-  // report itself. Either way the redactor is skipped.
+  // report itself. Either way the redactor is skipped — and so is the
+  // exposure check (see the module doc's "Security invariant" scoping note):
+  // no placeholder is in play, so there is nothing this module could rehydrate
+  // to check for exposure.
   if (!hinted && cleaned === content) return null;
 
-  const deletions = alignDeletions(content, cleaned);
+  // alignDeletions needs a true subsequence of `content`; the lone-surrogate
+  // normalization folded into `cleaned` is a substitution, not a deletion
+  // (see layer1View), so deletions are computed against the pre-normalization
+  // text. The substitution is same-length, so the resulting offsets remain
+  // valid against `cleaned` throughout the rest of this module.
+  const deletions = alignDeletions(content, layer1Cleaned);
   const view = await io.redactMap(cleaned);
   if ("unmappable" in view) {
     if (!hinted) return null;
@@ -388,7 +475,11 @@ export async function rehydrateRedacted(
   // mis-anchor the edit (identical to a no-op for BMP-only files).
   view.pairs = pairsToUtf16(view.text, view.pairs);
   // View identical to disk: any placeholders in the input are literal text.
-  if (view.pairs.length === 0 && deletions.length === 0) return null;
+  // `cleaned === content` also rules out a lone-surrogate-only divergence
+  // (view.pairs/deletions alone would miss that, since the normalization is
+  // neither a redaction pair nor a Layer-1 deletion).
+  if (view.pairs.length === 0 && deletions.length === 0 && cleaned === content)
+    return null;
 
   return tool === "Edit"
     ? rehydrateEdit(
