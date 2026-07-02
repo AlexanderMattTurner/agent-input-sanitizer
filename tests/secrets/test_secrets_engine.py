@@ -296,6 +296,87 @@ def test_known_prefix_redacted():
     assert result["text"] == "key: [REDACTED: AWS Access Key]"
 
 
+# ─── Invisible-character-spliced structural secrets (engine.py `_redact_line`,
+# `_cross_line_candidate_spans`) — a zero-width char wedged INSIDE a leaked
+# credential must not evade a structural (prefix) detector. ──────────────────
+
+_ANTHROPIC_BODY = ("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6" * 3)[:93]
+_ANTHROPIC_KEY = f"sk-ant-api03-{_ANTHROPIC_BODY}AA"
+
+
+def test_anthropic_key_fixture_is_shaped_like_the_detector_pattern():
+    assert re.fullmatch(
+        r"sk-ant-(?:api03|admin01)-[A-Za-z0-9_\-]{93}AA", _ANTHROPIC_KEY
+    )
+    # Sanity: the CLEAN key is already caught (proves the fixture is otherwise
+    # detector-eligible, isolating the spliced tests below to the splice itself).
+    result = run_plain(f"leaked key: {_ANTHROPIC_KEY} end")
+    assert result is not None
+    assert result["text"] == "leaked key: [REDACTED: Anthropic API Key] end"
+
+
+@pytest.mark.parametrize(
+    "sep",
+    ["​", "­", "⁦"],
+    ids=["zwsp", "soft-hyphen", "bidi-isolate"],
+)
+def test_invisible_char_spliced_structural_secret_is_redacted(sep):
+    """A zero-width char spliced into a leaked Anthropic key's body must not
+    evade the structural (prefix) detector — before the fix, only the env-bound
+    exact-match path tolerated interior invisibles, so this key sailed through
+    every OTHER detector (including this one) untouched. Assert every visible
+    byte of the key is actually gone, not just that a marker appeared somewhere.
+    """
+    mid = len(_ANTHROPIC_KEY) // 2
+    spliced = _ANTHROPIC_KEY[:mid] + sep + _ANTHROPIC_KEY[mid:]
+    text = f"leaked key: {spliced} end"
+
+    out, found = redact(text)
+
+    assert found == ["Anthropic API Key"], sep
+    assert sep not in out, sep
+    assert _ANTHROPIC_BODY not in out, sep
+    assert _ANTHROPIC_KEY not in out, sep
+    assert out == "leaked key: [REDACTED: Anthropic API Key] end", sep
+
+
+def test_invisible_char_spliced_structural_secret_map_mode_reconstructs():
+    """Map mode must record the ORIGINAL bytes (including the spliced invisible
+    char) so rehydration is byte-exact, not the clean detector-matched value."""
+    sep = "​"
+    mid = len(_ANTHROPIC_KEY) // 2
+    spliced = _ANTHROPIC_KEY[:mid] + sep + _ANTHROPIC_KEY[mid:]
+    text = f"leaked key: {spliced} end\n"
+
+    view = run_map(text)
+
+    assert view["found"] == ["Anthropic API Key"]
+    assert [p["placeholder"] for p in view["pairs"]] == [
+        "[REDACTED: Anthropic API Key]"
+    ]
+    assert view["pairs"][0]["original"] == spliced
+    assert reconstruct(view) == text
+
+
+def test_invisible_char_spliced_secret_split_across_lines_is_redacted():
+    """The cross-line pass must also see through a spliced invisible char: a
+    structural secret split by a newline AND carrying a splice must still be
+    caught whole, not just tolerated at the newline boundary."""
+    sep = "​"
+    mid = len(_ANTHROPIC_KEY) // 2
+    spliced = _ANTHROPIC_KEY[:mid] + sep + _ANTHROPIC_KEY[mid:]
+    split_point = 40
+    head, tail = spliced[:split_point], spliced[split_point:]
+    text = f"prefix {head}\n{tail} suffix"
+
+    out, found = redact(text)
+
+    assert found == ["Anthropic API Key"]
+    assert sep not in out
+    assert _ANTHROPIC_BODY not in out
+    assert out == "prefix [REDACTED: Anthropic API Key] suffix"
+
+
 def test_found_dedup():
     result = run_plain("k1: AKIAIOSFODNN7EXAMPLE\nk2: AKIAIOSFODNN7EXAMPLE")
     assert result is not None

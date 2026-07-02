@@ -31,7 +31,7 @@ from detect_secrets.settings import transient_settings
 
 from . import detectors
 from .config import RedactorConfig
-from .invisible import invisible_run_pattern
+from .invisible import invisible_run_pattern, strip_invisible_with_map
 
 PLUGINS = [
     {"name": n}
@@ -518,26 +518,36 @@ _CROSS_LINE_ELIGIBLE_TYPES = frozenset(
 def _cross_line_candidate_spans(
     collapsed: str, config: RedactorConfig
 ) -> list[tuple[int, int, str, str]]:
-    """``(start, end, placeholder, found_type)`` for every structural or env-bound
-    secret found in the newline-free view ``collapsed``.
+    """``(start, end, placeholder, found_type)`` — offsets into ``collapsed`` — for
+    every structural or env-bound secret found in the newline-free view
+    ``collapsed``.
 
     Only detector types in ``_CROSS_LINE_ELIGIBLE_TYPES`` (long, structurally
     rigid) are eligible; the exact env-var values are always eligible.
+
+    Structural detection runs on an invisible-character-STRIPPED view of
+    ``collapsed`` (mirroring :func:`_redact_line`), so a structural secret split
+    across a newline AND carrying a spliced invisible char is still seen whole;
+    matched spans are translated back to ``collapsed``'s own offsets via the
+    strip's offset map before being returned. The env-value match already
+    tolerates spliced invisibles itself (:func:`_env_value_re`), so it runs
+    directly on ``collapsed``.
     """
+    charset = config.resolved_charset()
     spans: list[tuple[int, int, str, str]] = []
-    for secret in scan_line(collapsed):
+    stripped, offsets = strip_invisible_with_map(collapsed, charset)
+    for secret in scan_line(stripped):
         if secret.type not in _CROSS_LINE_ELIGIBLE_TYPES:
             continue
         value = secret.secret_value
         if not value:
             continue
-        start = collapsed.find(value)
+        start = stripped.find(value)
         while start != -1:
-            spans.append(
-                (start, start + len(value), f"[REDACTED: {secret.type}]", secret.type)
-            )
-            start = collapsed.find(value, start + len(value))
-    charset = config.resolved_charset()
+            end = start + len(value)
+            cs, ce = offsets[start], offsets[end - 1] + 1
+            spans.append((cs, ce, f"[REDACTED: {secret.type}]", secret.type))
+            start = stripped.find(value, end)
     for name, value in config.env_secrets.items():
         if not value or len(value) < config.min_secret_len:
             continue
@@ -614,28 +624,62 @@ def _redact_line(
     web_ingress: bool,
     entries: list[tuple[str, str]] | None,
     found: list[str],
+    charset: frozenset[int] | None = None,
 ) -> str:
     """Redact every detected secret in one ``line``, appending each redacted type
     to ``found``.
 
-    Redact the longest values first. ``str.replace`` rewrites every occurrence,
-    so if a short secret that is a SUBSTRING of a longer one is redacted first,
-    the longer secret's value is no longer present and its check below skips it —
-    leaking the non-overlapping tail of the longer secret.
+    Detection runs against an invisible-character-STRIPPED view of ``line`` (so a
+    key with a zero-width character spliced into its body is seen whole by every
+    structural/plugin detector, not just the env-bound matcher's own tolerance —
+    see :func:`~agent_input_sanitizer.secrets.invisible.strip_invisible_with_map`),
+    then matched spans are translated back to ``line``'s ORIGINAL offsets before
+    redacting, so the invisible characters inside a redacted span disappear along
+    with the secret and everything outside a match is untouched byte-for-byte.
+    ``charset`` defaults to the shared SSOT charset (see
+    :func:`~agent_input_sanitizer.secrets.invisible.default_charset`); callers on
+    the hot path should pass ``config.resolved_charset()`` to avoid re-resolving
+    it per line.
+
+    Redact the longest values first (by original span length), skipping any
+    occurrence whose original span overlaps a span already accepted — so a short
+    secret that is a SUBSTRING of a longer one doesn't leak the longer secret's
+    non-overlapping tail.
     """
-    redacted = line
+    stripped, offsets = strip_invisible_with_map(line, charset)
+    accepted: list[tuple[int, int, str]] = []
+    redacted_spans: list[tuple[int, int]] = []
+
+    def _overlaps(a_start: int, a_end: int) -> bool:
+        return any(a_start < e and a_end > s for s, e in redacted_spans)
+
     for secret in sorted(
-        scan_line(line), key=lambda s: len(s.secret_value or ""), reverse=True
+        scan_line(stripped), key=lambda s: len(s.secret_value or ""), reverse=True
     ):
-        if not (secret.secret_value and secret.secret_value in redacted):
+        value = secret.secret_value
+        if not value or _is_benign_keyword_match(secret, stripped, web_ingress):
             continue
-        if _is_benign_keyword_match(secret, redacted, web_ingress):
-            continue
-        redacted = redacted.replace(
-            secret.secret_value,
-            _mark(entries, f"[REDACTED: {secret.type}]", secret.secret_value),
+        hit = False
+        start = stripped.find(value)
+        while start != -1:
+            end = start + len(value)
+            orig_start, orig_end = offsets[start], offsets[end - 1] + 1
+            if not _overlaps(orig_start, orig_end):
+                accepted.append((orig_start, orig_end, secret.type))
+                redacted_spans.append((orig_start, orig_end))
+                hit = True
+            start = stripped.find(value, end)
+        if hit:
+            found.append(secret.type)
+
+    if not accepted:
+        return line
+    redacted = line
+    for orig_start, orig_end, secret_type in sorted(accepted, reverse=True):
+        replacement = _mark(
+            entries, f"[REDACTED: {secret_type}]", redacted[orig_start:orig_end]
         )
-        found.append(secret.type)
+        redacted = redacted[:orig_start] + replacement + redacted[orig_end:]
     return redacted
 
 
@@ -656,6 +700,7 @@ def _redact_core(
     None and replacements are the plain placeholders.
     """
     web_ingress = config.web_ingress
+    charset = config.resolved_charset()
     found: list[str] = []
     # Redact configured env-var values first, then collapse PEM blocks so the line
     # scan never sees the base64 key body.
@@ -664,7 +709,8 @@ def _redact_core(
     # Catch newline-split tokens first, then scan what remains line by line.
     working = _redact_cross_line(working, found, config, entries)
     lines = [
-        _redact_line(line, web_ingress, entries, found) for line in working.split("\n")
+        _redact_line(line, web_ingress, entries, found, charset)
+        for line in working.split("\n")
     ]
 
     rejoined = "\n".join(lines)
