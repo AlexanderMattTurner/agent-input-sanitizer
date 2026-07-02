@@ -73,10 +73,21 @@ const reRedact = (text) =>
 
 // ─── Gating: which calls the layer even looks at ─────────────────────────────
 
+/**
+ * An error shaped like Node's real `fs` failures: a `.code` property, not
+ * just a message string that happens to say "ENOENT".
+ * @param {string} code
+ */
+function fsError(code) {
+  const err = new Error(code);
+  err.code = code;
+  return err;
+}
+
 describe("rehydrate: gating", () => {
   const unreadableIo = {
     readFile: () => {
-      throw new Error("ENOENT");
+      throw fsError("ENOENT");
     },
     redactMap: () => {
       throw new Error("redactMap must not be reached");
@@ -141,7 +152,7 @@ describe("rehydrate: gating", () => {
     );
   });
 
-  it("passes through when the target file is unreadable", async () => {
+  it("passes through when the target file is missing (ENOENT)", async () => {
     assert.equal(
       await rehydrateRedacted(
         "Edit",
@@ -149,6 +160,68 @@ describe("rehydrate: gating", () => {
         unreadableIo,
       ),
       null,
+    );
+  });
+
+  it("denies a hinted call on a non-ENOENT read failure instead of passing the placeholder through", async () => {
+    // EACCES (or any other read failure) means the file almost certainly still
+    // EXISTS with real bytes on disk — unlike ENOENT. Silently passing this
+    // through would let a hinted Write persist literal "[REDACTED…]" text over
+    // whatever real secret is actually there.
+    const eaccesIo = {
+      readFile: () => {
+        throw fsError("EACCES");
+      },
+      redactMap: () => {
+        throw new Error("redactMap must not be reached");
+      },
+      redact: () => null,
+    };
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/locked", content: `secret: ${PH}` },
+      eaccesIo,
+    );
+    assert.match(out.deny, /could not read \/locked/);
+    assert.match(out.deny, /EACCES/);
+    assert.equal(out.updatedInput, undefined);
+  });
+
+  it("falls back to the error message when a non-ENOENT failure carries no .code", async () => {
+    const noCodeIo = {
+      readFile: () => {
+        throw new Error("disk gremlins");
+      },
+      redactMap: () => {
+        throw new Error("redactMap must not be reached");
+      },
+      redact: () => null,
+    };
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/weird", content: `secret: ${PH}` },
+      noCodeIo,
+    );
+    assert.match(out.deny, /disk gremlins/);
+  });
+
+  it("rethrows a non-ENOENT read failure for a non-hinted call instead of swallowing it", async () => {
+    const eaccesIo = {
+      readFile: () => {
+        throw fsError("EACCES");
+      },
+      redactMap: () => {
+        throw new Error("redactMap must not be reached");
+      },
+      redact: () => null,
+    };
+    await assert.rejects(
+      rehydrateRedacted(
+        "Edit",
+        { file_path: "/locked", old_string: "a", new_string: "b" },
+        eaccesIo,
+      ),
+      /EACCES/,
     );
   });
 
@@ -888,8 +961,22 @@ describe("rehydrate: Write", () => {
     assert.match(out.context, /are preserved in the written file/);
   });
 
-  it("passes through content whose placeholders match none of the file's", async () => {
-    assert.equal(await write(`docs about ${PH_PEM} markers\n`), null);
+  it("denies content whose placeholder does not match any of the file's (cross-file/stale placeholder)", async () => {
+    // PH_PEM starts with the default hint ("[REDACTED") but this file's own
+    // view only produced PH ("[REDACTED]") — PH_PEM names a secret from
+    // elsewhere (or a stale/mistyped placeholder), not literal prose. Writing
+    // it verbatim would silently persist "[REDACTED: Private Key]" into a file
+    // where the model likely intended a real secret value.
+    const out = await write(`docs about ${PH_PEM} markers\n`);
+    assert.match(
+      out.deny,
+      /\[REDACTED…\] placeholder in the new content does not match any secret/,
+    );
+    assert.match(
+      out.deny,
+      /cannot copy a placeholder from another file or context/,
+    );
+    assert.equal(out.updatedInput, undefined);
   });
 
   it("denies when distinct secrets share one placeholder text", async () => {
@@ -1161,5 +1248,90 @@ describe("rehydrate: astral chars before a placeholder", () => {
     );
     assert.equal(out.updatedInput.old_string, `${SECRET_A}\nDEBUG=1`);
     assert.equal(out.updatedInput.new_string, `${SECRET_A}\nDEBUG=0`);
+  });
+});
+
+// ─── Lone-surrogate normalization matches the model's real view ──────────────
+
+// output.mjs normalizes lone UTF-16 surrogates to U+FFFD right after Layer 1,
+// BEFORE redaction runs — so that is what the model actually sees. rehydrate
+// must re-derive that exact same text (Layer 1, then the same normalization)
+// before matching old_string/handing text to the redactor, or the model's
+// faithfully-copied old_string can never match and every edit near a lone
+// surrogate is permanently, unfixably denied (re-reading the file reproduces
+// the same mismatch every time).
+describe("rehydrate: lone-surrogate normalization", () => {
+  const LONE_HIGH = String.fromCharCode(0xd800); // unpaired high surrogate
+  const FFFD = String.fromCharCode(0xfffd);
+
+  it("rehydrates a hinted edit whose old_string copies the model's U+FFFD-normalized view across a lone surrogate", async () => {
+    const content = `PASSWORD=${SECRET_A}${LONE_HIGH}\nDEBUG=1\n`;
+    const io = liveIo(
+      content,
+      [{ value: SECRET_A, placeholder: PH }],
+      reRedact,
+    );
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: `PASSWORD=${PH}${FFFD}\nDEBUG=1`,
+        new_string: `PASSWORD=${PH}${FFFD}\nDEBUG=0`,
+      },
+      io,
+    );
+    // old_string is re-anchored to the real disk bytes (the raw surrogate).
+    assert.equal(
+      out.updatedInput.old_string,
+      `PASSWORD=${SECRET_A}${LONE_HIGH}\nDEBUG=1`,
+    );
+    // new_string only has its PLACEHOLDER substituted; the model-authored
+    // U+FFFD elsewhere in it is not a placeholder, so it is carried through
+    // verbatim rather than reverted to the raw surrogate.
+    assert.equal(
+      out.updatedInput.new_string,
+      `PASSWORD=${SECRET_A}${FFFD}\nDEBUG=0`,
+    );
+  });
+
+  it("re-anchors a hint-free edit across a lone surrogate with nothing else divergent", async () => {
+    // No secrets, no Layer-1-stripped bytes anywhere in the file — the ONLY
+    // divergence between disk and the model's view is the surrogate
+    // normalization. Before the fix this hit the "view identical to disk"
+    // early exit and passed through, so the edit (built from the model's
+    // actual U+FFFD view) would never match raw disk bytes.
+    const content = `add(a, b)${LONE_HIGH};\nDEBUG=1\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: `add(a, b)${FFFD};\nDEBUG=1`,
+        new_string: `add(a, b, c)${FFFD};\nDEBUG=1`,
+      },
+      liveIo(content),
+    );
+    // old_string is re-anchored to the real disk bytes (the raw surrogate).
+    assert.equal(
+      out.updatedInput.old_string,
+      `add(a, b)${LONE_HIGH};\nDEBUG=1`,
+    );
+    // new_string carries no placeholder here, so nothing is translated: it is
+    // the model-authored text verbatim (still U+FFFD, not the raw surrogate).
+    assert.equal(out.updatedInput.new_string, `add(a, b, c)${FFFD};\nDEBUG=1`);
+  });
+
+  it("does not spuriously deny as an ambiguous anchor when a lone surrogate sits inside the matched span", async () => {
+    // Regression guard for the anchor-ambiguity re-clean check: comparing a
+    // freshly re-cleaned disk span against a normalized view span must ALSO
+    // normalize the re-clean, or every lone-surrogate-crossing edit would be
+    // misdiagnosed as an unsound anchor and denied instead of rewritten.
+    const content = `A${LONE_HIGH}B\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      { file_path: "/f", old_string: `A${FFFD}B`, new_string: "X" },
+      liveIo(content),
+    );
+    assert.equal(out.updatedInput.old_string, `A${LONE_HIGH}B`);
+    assert.equal(out.updatedInput.new_string, "X");
   });
 });
