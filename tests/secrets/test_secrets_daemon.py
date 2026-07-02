@@ -75,6 +75,13 @@ def test_request_config_filters_non_str_env_secrets():
 def test_request_config_missing_env_secrets_is_empty():
     config = S._request_config({"text": "x"})
     assert config.provider_vars == {}
+    # Fail-closed default: an omitted flag must get the STRONGER heuristics
+    # (web_ingress=True), not the weaker name-trusting local-output mode.
+    assert config.web_ingress is True
+
+
+def test_request_config_web_ingress_explicit_false_is_honored():
+    config = S._request_config({"text": "x", "web_ingress": False})
     assert config.web_ingress is False
 
 
@@ -146,10 +153,19 @@ def test_daemon_env_secret_redaction(daemon):
 
 def test_daemon_web_ingress_flag(daemon):
     text = "next_token: abcdefghij1234567890XYZ"
-    local = _client_request(daemon, {"text": text, "map": False})
-    web = _client_request(daemon, {"text": text, "map": False, "web_ingress": True})
+    # The daemon fails closed: an omitted flag defaults to web_ingress=True, so
+    # the local-output-trusting (name-based skip) path requires an EXPLICIT
+    # `web_ingress: false` opt-in.
+    local = _client_request(daemon, {"text": text, "map": False, "web_ingress": False})
+    web = _client_request(daemon, {"text": text, "map": False})
     assert local is None  # benign cursor kept for local output
     assert web is not None and "[REDACTED" in web["text"]
+
+
+def test_daemon_web_ingress_defaults_true_when_omitted(daemon):
+    text = "next_token: abcdefghij1234567890XYZ"
+    resp = _client_request(daemon, {"text": text, "map": False})
+    assert resp is not None and "[REDACTED" in resp["text"]
 
 
 def test_daemon_survives_malformed_frame_then_serves(daemon):

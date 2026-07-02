@@ -92,7 +92,13 @@ def _request_config(req: dict) -> RedactorConfig:
     )
     return RedactorConfig(
         provider_vars=provider_vars,
-        web_ingress=bool(req.get("web_ingress", False)),
+        # Fail closed: this is a SHARED, UNAUTHENTICATED local socket, so a
+        # caller that forgets (or has a buggy client that omits) the flag must
+        # get the stronger, non-name-trusting heuristics — not the weaker
+        # local-output mode that skips redaction for anything that merely
+        # LOOKS like a benign cursor/path/metadata field by variable name.
+        # Callers opt into the weaker mode explicitly with `web_ingress: false`.
+        web_ingress=bool(req.get("web_ingress", True)),
     )
 
 
