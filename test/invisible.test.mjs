@@ -1007,10 +1007,7 @@ describe("stripAnsiFully: CSI digits are never a final byte", () => {
     // Negative case: a real, TERMINATED CSI sequence (color 32m) must still be
     // removed in full — the digit-exclusion only affects an incomplete/dangling
     // intro, not a properly closed sequence.
-    assert.equal(
-      stripAnsiFully(`${cp(0x1b)}[32mhello${cp(0x1b)}[0m`),
-      "hello",
-    );
+    assert.equal(stripAnsiFully(`${cp(0x1b)}[32mhello${cp(0x1b)}[0m`), "hello");
   });
 
   it("still fully removes a cursor-move/erase CSI sequence (non-SGR hazard)", () => {
@@ -1052,17 +1049,12 @@ describe("stripAnsiFully: an interior bare ESC aborts an OSC string in place", (
     // Negative case: no ST/BEL/interior-ESC/nested-intro anywhere — the only
     // safe behavior for a truly dangling OSC introducer is to drop the whole
     // dangling remainder, exactly as before this fix.
-    assert.equal(
-      stripAnsiFully(`${cp(0x1b)}]0;UNTERMINATED`),
-      "",
-    );
+    assert.equal(stripAnsiFully(`${cp(0x1b)}]0;UNTERMINATED`), "");
   });
 
   it("still consumes a properly ST-terminated OSC string in full (no change from the fix)", () => {
     assert.equal(
-      stripAnsiFully(
-        `before${cp(0x1b)}]0;TITLE${cp(0x1b)}\\after`,
-      ),
+      stripAnsiFully(`before${cp(0x1b)}]0;TITLE${cp(0x1b)}\\after`),
       "beforeafter",
     );
   });
