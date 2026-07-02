@@ -1,6 +1,7 @@
 name: Validate config
 on:
   push:
+    branches: ["main"]
     paths:
       - ".claude/**"
       - ".hooks/**"

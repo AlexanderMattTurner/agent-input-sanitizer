@@ -14,6 +14,8 @@ on:
       - "**/*.cts"
       - "**/tsconfig*.json"
       - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/actions/setup-base-env/action.yaml"
       - ".github/workflows/node-tests.yaml"
   # No paths filter on pull_request: this is a Required check, and a workflow-level
   # path filter would skip the whole workflow (including the node-tests-passed
