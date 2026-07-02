@@ -29,9 +29,13 @@ describe("sanitize: Layer 1 ESC neutralization + idempotency", () => {
       "[ payload",
     ],
     [
+      // Digits are never a valid CSI final byte (ECMA-48 finals are
+      // 0x40-0x7E), so `ESC[3` alone is not a complete sequence; the
+      // invisible-strip pass reconstitutes the full `ESC[32m` (a complete,
+      // legitimate SGR color sequence), which the re-strip pass then removes.
       "post-introducer split (one-pass)",
       `${ESC}[3${ZW}2m payload`,
-      "2m payload",
+      " payload",
     ],
     [
       "ANSI removal reconstitutes a sequence",
