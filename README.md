@@ -50,6 +50,23 @@ transform with no such hook, and `fs (direct)` means it does its own file I/O
 
 See [`THREAT-MODEL.md`](./THREAT-MODEL.md) for per-vector detail.
 
+### `found` codes
+
+`found` (from `sanitize`/`stripInvisibleWithReport`) is a stable, machine-readable
+contract—branch on these codes, not on `warnings` prose, which can be reworded
+without notice.
+
+| Code                  | Meaning                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `cf-format`           | Unicode format chars (`Cf`): zero-width space/joiner, bidi overrides, tag chars                         |
+| `variation-selectors` | Variation selectors (U+FE00–FE0F, U+E0100–E01EF)                                                        |
+| `blank-fillers`       | Blank-rendering fillers not covered by `Cf` (Hangul fillers, Braille blank, zero-width combining marks) |
+| `ansi`                | ANSI/SGR escapes and other terminal control sequences                                                   |
+| `lone-surrogates`     | Unpaired UTF-16 surrogates                                                                              |
+| `html-comments`       | HTML comments spliced out by Layer 2                                                                    |
+| `hidden-html`         | Elements hidden via CSS/attribute (`display:none`, `hidden`, etc.) spliced out by Layer 2               |
+| `exfil-urls`          | Exfil-shaped URLs detected by Layer 3 (reported, not removed)                                           |
+
 ## How this compares
 
 The "sanitize untrusted LLM input" space mostly splits into two camps: ML
@@ -87,7 +104,7 @@ import {
   detectExfil,
   checkExfilUrl,
 } from "agent-input-sanitizer/html";
-sanitizeHtml(pageSource); // cleaned string, or null when nothing to strip
+sanitizeHtml(pageSource); // { text, removed, warned } | null — text may be unchanged if only reportable (not strippable) tags were found
 detectExfil(pageSource); // [{ isImage, reason, target }] or null
 checkExfilUrl(oneUrl); // reason string or null
 ```
@@ -152,7 +169,12 @@ through the bundled CLI, so there’s
 no second implementation to drift. An `op` field selects the entry point
 (default `sanitize`); the self-contained ones—`sanitizeText`, `classifyPrompt`,
 `scanInstructionFiles`, `cleanFile`—are all bridged. Entry points with an
-injected JS callback have no wire form and stay JS-only.
+injected JS callback have no wire form and stay JS-only. The bridged
+`sanitizeText` runs Layers 1–3 only (invisible/ANSI strip, HTML hidden-content
+splice, exfil detection): it never redacts secrets (Layer 4) or runs injection
+filtering (Layer 5), and the wire protocol's `sgrNote` (Python's
+`TextResult.sgr_note`) is always `false`, since the bridge never wires
+`sgrCarveOut`.
 
 ```sh
 echo '{"text":"a​b"}' | npx sanitize-cli           # default op: sanitize
@@ -161,10 +183,12 @@ sanitize-cli --worker                              # newline-delimited, one resp
 ```
 
 The [`python/`](./python) client wraps every bridged op (`sanitize`,
-`sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). It
-auto-resolves the CLI when imported from a JS repo checkout; a `pip install`ed
-wheel doesn't bundle the JS (a vendored copy would drift), so set
-`AGENT_SANITIZER_CLI` to that checkout's `bin/sanitize-cli.mjs`. The first
+`sanitize_text`, `classify_prompt`, `scan_instruction_files`, `clean_file`). The
+wheel ships a self-contained, single-file build of the CLI (`src/` and its npm
+dependencies bundled into one `.mjs` at release time), so a `pip install` plus
+Node.js (>=22) on `PATH` works with no separate JavaScript checkout to clone.
+`AGENT_SANITIZER_CLI` is only an override escape hatch (e.g. to point at a
+custom/dev build)—a normal install never needs to set it. The first
 `html=True` call starts a shared worker, so the ~200 ms HTML module-load is
 paid **once per process**; Layer-1 calls stay one-shot. `persist=True/False`
 forces the mode and `shutdown_worker()` (also an `atexit` hook) stops it.
