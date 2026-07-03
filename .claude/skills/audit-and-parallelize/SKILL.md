@@ -64,7 +64,18 @@ branch, Conventional Commits, and a **proving test added before the fix**.
 
 Before handing it over, attack your own plan: Is any "fix" actually changing intentional design?
 Does any finding contradict a documented tradeoff? Are the PRs genuinely independent? Is the volume
-honest? Surface these as a self-critique section rather than letting the reviewer find them.
+honest? Surface these as a self-critique section rather than letting the reviewer find them. This
+presentation is the ONE moment to batch every open question (design calls, scope judgments) —
+concentrate them here, before implementation starts.
+
+### 6. Execute without checkpointing
+
+When the request includes fixing (or the user says to proceed), the whole confirmed-PR list is in
+scope — land **every** PR without stopping to ask "should I continue / move on to the next one?"
+The answer is always yes. A design choice that surfaces only mid-implementation gets a sensible
+default and a `## Decisions made` entry in that PR's description (what came up, the default chosen,
+what would change under the alternative) — logged for async review, not asked. Maintain a checklist
+of the PR queue and tick each off as it opens, so progress is supervisable at a glance.
 
 ## Examples
 
@@ -90,6 +101,9 @@ positives and why.
 - **Trusting a subagent's "CRITICAL" label.** It is a hypothesis, not a result. Read the code.
 - **Padding to a number.** If only five issues are real, plan five. The over-report is the finding.
 - **One giant PR.** Disjoint PRs parallelize and review cleanly; a mega-PR serializes everything.
+- **Checkpointing between PRs.** Pausing after each PR to ask "move on to the next?" stalls the run
+  for hours of wall-clock waiting on a yes. Questions belong batched at plan delivery; after that,
+  run the queue to completion.
 - **Recall over precision in detectors.** A noisy new check that flags legitimate input trains
   operators to ignore the signal. When a heuristic can't cleanly separate payload from benign input,
   prefer the false negative.
