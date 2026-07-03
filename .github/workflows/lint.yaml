@@ -1,24 +1,12 @@
 name: Lint
 
+# No paths filter: lint-passed is a required status check, so the workflow must
+# always fire and report — a path-gated required check hangs at
+# "Expected — Waiting" forever when a PR doesn't touch the filtered paths. The
+# lint job no-ops when no lint/check script is configured, so it stays cheap.
 on:
   push:
     branches: ["main"]
-    paths:
-      - "**/*.ts"
-      - "**/*.tsx"
-      - "**/*.js"
-      - "**/*.jsx"
-      - "**/*.mjs"
-      - "**/*.cjs"
-      - "**/tsconfig*.json"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - ".github/actions/setup-base-env/action.yaml"
-      - ".github/workflows/lint.yaml"
-  # No paths filter on pull_request: this is a Required check, and a workflow-level
-  # path filter would skip the whole workflow (including the lint-passed reporter)
-  # on PRs that don't touch these paths, stranding the check at "Expected — Waiting".
-  # The job below cheaply no-ops via script-configured.sh when nothing applies.
   pull_request:
 
 concurrency:
@@ -33,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 

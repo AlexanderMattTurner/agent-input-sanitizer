@@ -1,23 +1,22 @@
 name: Sync required status checks
 
-# The apply half of the check-required-reporter pair. The pre-commit hook forces
-# every always() reporter on a PR-triggered workflow to carry a
-# `# required-check: true|false` annotation; this workflow reads those
-# annotations (the SSOT), expands each required job's name across its own matrix,
-# and rewrites the branch-protection ruleset's required_status_checks to exactly
-# that set — so a reporter's classification and the gate that actually blocks
-# merges can never silently drift apart.
+# Apply half of the check-required-reporter pair. The pre-commit hook forces
+# every always() reporter to carry a `# required-check: true|false` annotation;
+# the apply tool (hosted in ci-truth-serum) reads those annotations (the SSOT),
+# expands each required job's name across its own matrix, and rewrites the
+# branch-protection ruleset's required_status_checks to exactly that set — so a
+# reporter's classification and the gate that actually blocks merges can never
+# silently drift apart.
 #
-# Runs only post-merge on main (and on demand); it never gates a PR, so it is not
-# itself a required check. Mutating branch protection needs a token with
-# `administration: write` — the stock GITHUB_TOKEN cannot edit rulesets. Provide
-# it as the RULESET_SYNC_TOKEN secret; the job fails loud if it is absent.
+# Runs only post-merge on main (and on demand). It mutates branch protection, so
+# it needs a token with `administration: write`; the stock GITHUB_TOKEN cannot
+# edit rulesets. Provide it as the RULESET_SYNC_TOKEN secret — the job fails loud
+# if it is absent. Not a required check itself (no pull_request trigger).
 on:
   push:
     branches: [main]
     paths:
       - .github/workflows/**
-      - .github/scripts/sync-required-checks.sh
       - .pre-commit-config.yaml
   workflow_dispatch:
     inputs:
@@ -30,10 +29,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Serialize ruleset writes so two back-to-back merges can't race the PATCH. A
-  # static, ref-less group is safe here only because this workflow has no
-  # pull_request trigger — it never backs a required check that a cancelled run
-  # could strand at "Expected — Waiting".
+  # Serialize ruleset writes so two back-to-back merges can't race the PATCH.
+  # Static group is intentional and safe here: this workflow has no pull_request
+  # trigger, so it never backs a required check that a cancelled run could hang.
   group: sync-required-checks
   cancel-in-progress: false
   # static-concurrency-ok: not a required check (push/dispatch only)
@@ -44,13 +42,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Install the apply tool (ci-truth-serum)
+        # Pin to the same ci-truth-serum commit the pre-commit hook uses so the
+        # lint and the apply step share one parser version.
+        run: python3 -m pip install --user "ci-truth-serum @ git+https://github.com/alexander-turner/ci-truth-serum@e438c361e232fa2f69ab36ff9a29a1e639e0c5a7"
+
       - name: Sync required status checks
         env:
           GH_TOKEN: ${{ secrets.RULESET_SYNC_TOKEN }}
           REPO: ${{ github.repository }}
           CHECK_ONLY: ${{ inputs.check-only }}
-        run: bash .github/scripts/sync-required-checks.sh
+        run: |
+          args=(--repo "$REPO")
+          if [[ "$CHECK_ONLY" == "true" ]]; then
+            args+=(--check)
+          fi
+          python3 -m hooks.sync_required_checks "${args[@]}"
