@@ -75,7 +75,5 @@ def test_non_supervision_paths_pass_without_label(tmp_path: Path) -> None:
 
 
 def test_lookalike_label_does_not_unblock(tmp_path: Path) -> None:
-    result = run_gate(
-        tmp_path, "CLAUDE.md", labels="supervision-reviewed-not-really"
-    )
+    result = run_gate(tmp_path, "CLAUDE.md", labels="supervision-reviewed-not-really")
     assert result.returncode == 1
