@@ -1,94 +1,59 @@
-name: Auto Version Bump and Publish
+name: Auto version bump and publish
 
-# Post-merge release. On every push to main, version-bump.sh decides the semver
-# bump from Conventional Commits since the last tag, has Claude draft the
-# CHANGELOG prose (optional), publishes to npm with provenance via OIDC trusted
-# publishing, promotes the `## Unreleased` block to a dated section, commits the
-# release docs back to main (`[skip ci]`), and tags vX.Y.Z. npm + git tags are
-# the source of truth for the version; package.json is not committed.
+# On every push to the default branch, decide a Conventional-Commits semver bump
+# from the commits since the last vX.Y.Z tag and publish the package to npm with
+# provenance (OIDC trusted publishing — no NPM_TOKEN). The version is tracked by
+# the npm registry and git tags, never committed to package.json. The Claude API
+# drafts the CHANGELOG prose and degrades to a plain commit list when it is
+# unavailable. See .github/scripts/version-bump.sh for the full logic.
 #
-# The Python distribution is COUPLED to this release: because the wheel bundles a
-# build of `src/`, npm and PyPI ship the same logic, so they share one version.
-# When version-bump.sh publishes a new npm release it emits `released`/`version`
-# outputs, and the steps below build the wheel at that same version (bundling
-# `src/`) and publish it to PyPI via OIDC trusted publishing. PyPI's Trusted
-# Publisher must therefore point at THIS workflow file (auto-version.yaml).
+# Self-publish guard: version-bump.sh exits early when package.json has
+# "private": true, so the template repo never publishes itself. A downstream
+# repo opts in by dropping `private` and setting a real, publishable name.
+#
+# Versioned-app workflow: only adopt this in a repo that is published to npm.
+# Repos that are not npm packages (e.g. a website like TurnTrout.com) should
+# exclude it via the template-sync EXCLUDE_PATHS list — see
+# .github/workflows/template-sync.yaml.
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
 
 concurrency:
-  group: version-and-publish
+  group: auto-version
   cancel-in-progress: false
 
 permissions:
   contents: write
+  # Required for npm OIDC trusted publishing (`pnpm publish --provenance`).
   id-token: write
 
 jobs:
   version-and-publish:
+    name: Bump version and publish to npm
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         # Credentials stay persisted: version-bump.sh pushes the release-docs
-        # commit to main and the tag with them. A PAT clears branch/tag
-        # protection; falls back to GITHUB_TOKEN.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3 # zizmor: ignore[artipacked]
+        # commit and the vX.Y.Z tag with them. A PAT lets the tag push clear any
+        # tag protection; falls back to GITHUB_TOKEN.
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6.0.2 # zizmor: ignore[artipacked]
         with:
-          # Full history so the script can find the last tag and the commit range.
+          # Need full history so `git describe`/`git log` can find the last tag.
           fetch-depth: 0
           token: ${{ secrets.TEMPLATE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Setup
+      - name: Setup base environment
         uses: ./.github/actions/setup-base-env
         with:
+          # Pin the publish runtime explicitly (npm OIDC trusted publishing needs
+          # a recent npm) and point it at the npm registry so provenance works.
+          node-version: 24
           registry-url: https://registry.npmjs.org
-          # No caching in the publish path (zizmor cache-poisoning) — a poisoned
-          # pnpm store cache could tamper with the esbuild bundle shipped to both
-          # npm and PyPI, same rationale as the uv `enable-cache: false` below.
-          cache: "false"
 
-      - name: Auto Version Bump and Publish
-        id: bump
-        run: bash scripts/version-bump.sh
+      - name: Bump version and publish if commits warrant a release
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-      # Coupled Python release: build the wheel at the just-published version
-      # (bundling src/) and publish to PyPI. Gated on a genuine npm release this
-      # run, so a no-op push does nothing here. Node + pnpm (with esbuild for the
-      # bundle) are already set up above; add uv for the build. No caching in the
-      # publish path (zizmor cache-poisoning) — a poisoned cache could tamper with
-      # the artifact shipped to PyPI.
-      - name: Set up uv
-        if: steps.bump.outputs.released == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          enable-cache: false
-
-      - name: Bundle the CLI into the Python package
-        if: steps.bump.outputs.released == 'true'
-        run: node scripts/bundle-python-cli.mjs
-
-      - name: Set the wheel version to the release version
-        if: steps.bump.outputs.released == 'true'
-        run: bash scripts/set-pyproject-version.sh "$RELEASE_VERSION"
-        env:
-          RELEASE_VERSION: ${{ steps.bump.outputs.version }}
-
-      - name: Build the Python distribution
-        if: steps.bump.outputs.released == 'true'
-        run: uv build
-        working-directory: python
-
-      - name: Check distribution metadata
-        if: steps.bump.outputs.released == 'true'
-        run: uvx twine check python/dist/*
-
-      - name: Publish to PyPI
-        if: steps.bump.outputs.released == 'true'
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
-        with:
-          packages-dir: python/dist/
+        run: bash .github/scripts/version-bump.sh

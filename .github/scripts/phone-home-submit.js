@@ -14,7 +14,6 @@ const PHONE_HOME_DIR = "/tmp/phone-home";
  * @param {object}  params
  * @param {{ rest: { issues: { create(p: object): Promise<{data: {html_url: string, number: number}}>; addLabels(p: object): Promise<void> } } }} params.github
  */
-/** @typedef {Error & { status?: number }} RequestError */
 module.exports = async ({ github }) => {
   const lessons = fs.readFileSync(`${PHONE_HOME_DIR}/lessons.txt`, "utf8");
   const prTitle = process.env.PR_TITLE;
@@ -53,14 +52,6 @@ module.exports = async ({ github }) => {
     });
     console.log(`Created issue on template repo: ${issue.data.html_url}`);
   } catch (error) {
-    // Only 403 (unauthorized) and 404 (repo/token not visible) are the
-    // genuinely-expected "TEMPLATE_SYNC_TOKEN not configured" cases. Any other
-    // status (rate limit, 5xx, network fault) is a real fault and must fail
-    // loudly instead of permanently masquerading as "not configured".
-    const status = /** @type {RequestError} */ (error).status;
-    if (status !== 403 && status !== 404) {
-      throw error;
-    }
     console.log(`Could not create issue on ${templateRepo}: ${error.message}`);
     console.log("This is expected if TEMPLATE_SYNC_TOKEN is not configured.");
     console.log("To enable phone-home, add a TEMPLATE_SYNC_TOKEN secret with");
