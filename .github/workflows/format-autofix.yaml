@@ -32,16 +32,16 @@ jobs:
       # preflight step that exposes it as a step output; when it's absent every
       # later step is skipped and the job ends green (a no-op), instead of the
       # checkout failing on an empty token.
-      - name: Check for AUTOFIX_TOKEN
+      - name: Check for AUTOFIX_TOKEN_ORG
         id: guard
         env:
-          AUTOFIX_TOKEN: ${{ secrets.AUTOFIX_TOKEN }}
+          AUTOFIX_TOKEN_ORG: ${{ secrets.AUTOFIX_TOKEN_ORG }}
         run: |
-          if [ -n "$AUTOFIX_TOKEN" ]; then
+          if [ -n "$AUTOFIX_TOKEN_ORG" ]; then
             echo "enabled=true" >>"$GITHUB_OUTPUT"
           else
             echo "enabled=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::AUTOFIX_TOKEN secret is not set; skipping autofix. Add a fine-grained PAT (contents: write) so the fix-commit re-triggers format-check."
+            echo "::notice::AUTOFIX_TOKEN_ORG secret is not set; skipping autofix. Add a fine-grained PAT (contents: write) so the fix-commit re-triggers format-check."
           fi
 
       - if: steps.guard.outputs.enabled == 'true'
@@ -49,7 +49,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           # PAT/App token, NOT GITHUB_TOKEN, so the push re-triggers format-check.
-          token: ${{ secrets.AUTOFIX_TOKEN }}
+          token: ${{ secrets.AUTOFIX_TOKEN_ORG }}
           persist-credentials: true
           fetch-depth: 0
 
