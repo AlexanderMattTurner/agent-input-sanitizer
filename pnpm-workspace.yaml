@@ -1,2 +1,6 @@
 allowBuilds:
   esbuild: true
+overrides:
+  # GHSA-q8mj-m7cp-5q26: qs.stringify DoS in comma-format arrays with
+  # encodeValuesOnly. Dev-only transitive (stryker > typed-rest-client > qs).
+  "qs@>=6.11.1 <=6.15.1": ">=6.15.2"
