@@ -92,6 +92,25 @@
     {
       "name": "reversed_surrogate_pair",
       "units": [56832, 55357]
+    },
+    {
+      "name": "flag_tag_scotland",
+      "units": [
+        55356, 57332, 56128, 56423, 56128, 56418, 56128, 56435, 56128, 56419,
+        56128, 56436, 56128, 56447
+      ]
+    },
+    {
+      "name": "standardized_variation_empty_set",
+      "units": [8709, 65024]
+    },
+    {
+      "name": "ideographic_variation_ge",
+      "units": [33883, 56128, 56576]
+    },
+    {
+      "name": "malformed_tag_run",
+      "units": [55356, 57332, 56128, 56423, 56128, 56418]
     }
   ]
 }

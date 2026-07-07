@@ -16,5 +16,9 @@
     "id": "confusables-layer1",
     "mutate": "src/confusables.mjs,src/layer1.mjs"
   },
-  { "id": "joining-type", "mutate": "src/joining-type.mjs" }
+  { "id": "joining-type", "mutate": "src/joining-type.mjs" },
+  {
+    "id": "standardized-variants",
+    "mutate": "src/standardized-variants.mjs"
+  }
 ]

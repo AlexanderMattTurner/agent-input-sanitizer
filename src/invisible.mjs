@@ -10,6 +10,7 @@
  * actual cursive-join semantics rather than a hand-rolled script guess.
  */
 import { joiningType, isVirama } from "./joining-type.mjs";
+import { isStandardizedVariant } from "./standardized-variants.mjs";
 
 export const VS = [
   ...Array.from({ length: 16 }, (_, i) => 0xfe00 + i),
@@ -154,7 +155,10 @@ export const LONG_RUN_RE = new RegExp(
 export function describeStripped(invisFound, deAnsi) {
   let msg = `Stripped: ${invisFound.map((code) => CATEGORY_LABELS[code]).join(", ")}`;
   LONG_RUN_RE.lastIndex = 0;
-  if (LONG_RUN_RE.test(deAnsi))
+  // Probe only the PAYLOAD invisibles: a legitimate emoji/flag/variation
+  // sequence is carve-out-preserved and masked out here, so it never trips the
+  // injection marker (alert fatigue) while a genuine hidden run still surfaces.
+  if (LONG_RUN_RE.test(payloadInvisibleView(deAnsi)))
     msg += " [LONG RUN — possible injection payload]";
   return (
     msg +
@@ -265,6 +269,89 @@ const VARIATION_SELECTOR = new RegExp(`[${VS}]`, "u");
 // visible glyph, not a hidden variation-selector run.
 const PRESENTATION_SELECTORS = new Set([0xfe0e, 0xfe0f]);
 
+// ─── Emoji tag sequences (subregional flags) ─────────────────────────────────
+// A subregional flag (🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland, 🏴󠁧󠁢󠁷󠁬󠁳󠁿 Wales, 🏴󠁧󠁢󠁥󠁮󠁧󠁿 England …) is a WAVING
+// BLACK FLAG tag_base (U+1F3F4, a visible pictograph) followed by one or more
+// tag characters in U+E0020–U+E007E, terminated by U+E007F CANCEL TAG. Only that
+// exact grammar is preserved verbatim; any tag char (the whole U+E0000–U+E007F
+// block is category Cf) NOT inside a well-formed 🏴 … CANCEL run stays stripped —
+// tag chars are the top ASCII-smuggling vector, so preservation fails CLOSED on a
+// malformed/partial run.
+const TAG_BASE = 0x1f3f4; // WAVING BLACK FLAG
+const TAG_CANCEL = 0xe007f; // CANCEL TAG (the required terminator)
+const TAG_SPEC_MIN = 0xe0020; // first tag char a flag sequence may carry
+const TAG_SPEC_MAX = 0xe007e; // last tag char a flag sequence may carry
+
+// ─── Ideographic variation selectors (VS17–VS256, U+E0100–U+E01EF) ────────────
+// An ideographic variation sequence is a CJK ideograph followed by a selector in
+// U+E0100–U+E01EF. Preserved ONLY when the immediately preceding code point is a
+// CJK ideograph — the registry-faithful structural gate (IVS apply to ideographs
+// and nothing else). The ranges are the Unicode ideograph blocks: Unified,
+// Extensions A–I, and the two Compatibility Ideograph blocks.
+const IVS_MIN = 0xe0100;
+const IVS_MAX = 0xe01ef;
+const CJK_IDEOGRAPH_RANGES = [
+  [0x3400, 0x4dbf], // CJK Unified Ideographs Extension A
+  [0x4e00, 0x9fff], // CJK Unified Ideographs
+  [0xf900, 0xfaff], // CJK Compatibility Ideographs
+  [0x20000, 0x2a6df], // Extension B
+  [0x2a700, 0x2b73f], // Extension C
+  [0x2b740, 0x2b81f], // Extension D
+  [0x2b820, 0x2ceaf], // Extension E
+  [0x2ceb0, 0x2ebef], // Extension F
+  [0x2ebf0, 0x2ee5f], // Extension I
+  [0x2f800, 0x2fa1f], // CJK Compatibility Ideographs Supplement
+  [0x30000, 0x3134f], // Extension G
+  [0x31350, 0x323af], // Extension H
+];
+
+/** True when `cp` is a CJK ideograph (the only base an ideographic variation
+ * selector legitimately follows). @param {number} cp @returns {boolean} */
+function isCjkIdeograph(cp) {
+  for (const [start, end] of CJK_IDEOGRAPH_RANGES)
+    if (cp >= start && cp <= end) return true;
+  return false;
+}
+
+// ─── Blank-filler carve-out (Braille / archaic Hangul) ───────────────────────
+// U+2800 (BRAILLE PATTERN BLANK) and the Hangul fillers render blank, so a RUN
+// of them is a hidden channel — but a lone one does real work in genuine Braille
+// (the empty cell) or archaic-Korean text, where stripping it mangles content.
+// Gate them like the joiner carve-out: preserve one only next to a real,
+// script-appropriate visible neighbour (a non-blank Braille cell; a Hangul
+// jamo/syllable). A run of fillers has only fillers for neighbours, so it fails
+// the anchor and is stripped — the run-length gate falls out of the anchor. The
+// zero-width Mn marks in BLANK_NON_CF (U+034F/17B4/17B5) have no such benign
+// standalone use, so they are never preserved.
+const BRAILLE_BLANK = 0x2800;
+const HANGUL_FILLERS = new Set([0x115f, 0x1160, 0x3164, 0xffa0]);
+// Code points that trigger the carve-out path for blank fillers (see
+// needsCarveOut). Written as \u escapes: a raw blank-rendering byte in a regex
+// literal is invisible to the eye and a correctness landmine for the next editor.
+const GATED_BLANK_RE = new RegExp("[\\u115F\\u1160\\u2800\\u3164\\uFFA0]", "u");
+
+/** A real (non-blank) Braille cell — the anchoring neighbour for a U+2800 blank.
+ * @param {string} ch @returns {boolean} */
+function isBrailleCell(ch) {
+  const cp = ch ? /** @type {number} */ (ch.codePointAt(0)) : -1;
+  return cp >= 0x2801 && cp <= 0x28ff;
+}
+
+/** A Hangul jamo/syllable (NOT itself one of the fillers) — the anchoring
+ * neighbour for a Hangul filler. @param {string} ch @returns {boolean} */
+function isHangul(ch) {
+  const cp = ch ? /** @type {number} */ (ch.codePointAt(0)) : -1;
+  if (HANGUL_FILLERS.has(cp)) return false; // a filler cannot anchor another filler
+  return (
+    (cp >= 0x1100 && cp <= 0x11ff) || // Hangul Jamo
+    (cp >= 0x3130 && cp <= 0x318f) || // Hangul Compatibility Jamo
+    (cp >= 0xa960 && cp <= 0xa97f) || // Jamo Extended-A
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul Syllables
+    (cp >= 0xd7b0 && cp <= 0xd7ff) || // Jamo Extended-B
+    (cp >= 0xffa1 && cp <= 0xffdc) // Halfwidth Jamo (FFA0 is the filler itself)
+  );
+}
+
 // Non-global single-char classifiers (CHECKS carry `g`, whose lastIndex is
 // stateful across `.test`). carveStrip uses these to attribute each removed
 // char to its CHECKS category so `found` names exactly what was stripped.
@@ -334,12 +421,14 @@ function isPreservedJoiner(cps, i) {
   const cp = /** @type {number} */ (cps[i].codePointAt(0));
   if (cp !== ZWNJ && cp !== ZWJ) return false;
   const prev = cps[i - 1] ?? "";
-  const next = cps[i + 1] ?? "";
-  // Emoji ZWJ sequences use ZWJ only; the real left neighbour is the pictograph.
+  // Emoji ZWJ sequences use ZWJ only; the real neighbours are the pictographs,
+  // which may each sit behind a variation selector (🏳️‍🌈 = base VS16 ZWJ rainbow;
+  // a selector can also follow the ZWJ before the next base), so step over
+  // selectors on BOTH sides — leftNonSelector and its mirror rightNonSelector.
   if (
     cp === ZWJ &&
     EMOJI_LEFT.test(leftNonSelector(cps, i)) &&
-    EMOJI_BASE.test(next)
+    EMOJI_BASE.test(rightNonSelector(cps, i))
   )
     return true;
   // Indic: meaningful only immediately after a virama (halant / half-form).
@@ -373,27 +462,47 @@ function isEmojiPresentationSelector(cps, i) {
 /**
  * Per-invisible carve-out analysis, shared by carveStrip and
  * countPayloadInvisible: for each code point, its CHECKS category (null when
- * visible) and its preserve `kind` ("joiner" | "emojivs" | null). Everything
- * invisible that is NOT preserve-eligible is payload; the scatter floor counts
- * only that, so meaningful joiners never push honest prose over the threshold.
+ * visible) and its preserve `kind` ("joiner" | "emojivs" | "tag" | "stdvs" |
+ * "ivs" | "blank" | null). Everything invisible that is NOT preserve-eligible is
+ * payload; the scatter floor counts only that, so meaningful joiners/selectors
+ * never push honest prose over the threshold. `tagSpanLen[i]` is the length of a
+ * tag sequence starting at `i` (0 elsewhere) so carveStrip can preserve-or-strip
+ * each flag as an atomic unit (a budget cut mid-sequence would leave a malformed
+ * partial run the next pass would strip — breaking idempotence).
  * @param {string[]} cps
- * @returns {{ codes: (string|null)[], kind: (string|null)[], payloadInvis: number, visibleLen: number }}
+ * @returns {{ codes: (string|null)[], kind: (string|null)[], tagSpanLen: number[], payloadInvis: number, visibleLen: number }}
  */
 function analyzeCarve(cps) {
   const codes = cps.map(classify);
+  const tagKeep = markTagSequences(cps);
   const kind = cps.map((_, i) => {
     if (codes[i] === null) return null;
+    if (tagKeep[i]) return "tag";
     if (isPreservedJoiner(cps, i)) return "joiner";
     if (isEmojiPresentationSelector(cps, i)) return "emojivs";
+    if (isStandardizedVariationSelector(cps, i)) return "stdvs";
+    if (isIdeographicVariationSelector(cps, i)) return "ivs";
+    if (isPreservedBlankFiller(cps, i)) return "blank";
     return null;
   });
+  const tagSpanLen = new Array(cps.length).fill(0);
+  for (let i = 0; i < cps.length;) {
+    if (kind[i] !== "tag") {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < cps.length && kind[j] === "tag") j++;
+    tagSpanLen[i] = j - i;
+    i = j;
+  }
   let payloadInvis = 0;
   let visibleLen = 0;
   for (let i = 0; i < cps.length; i++) {
     if (codes[i] === null) visibleLen++;
     else if (kind[i] === null) payloadInvis++;
   }
-  return { codes, kind, payloadInvis, visibleLen };
+  return { codes, kind, tagSpanLen, payloadInvis, visibleLen };
 }
 
 /**
@@ -440,14 +549,110 @@ function leftNonSelector(cps, i) {
 }
 
 /**
- * Carve-out strip (a ZWNJ/ZWJ is present): walk code points, preserving a join
- * control only where isPreservedJoiner holds AND the text stays under the
- * scatter floor AND neither the per-cluster (CONSECUTIVE_JOINER_CAP) nor the
- * document-wide (TOTAL_PRESERVED_JOINER_BUDGET) preserve limit is hit —
- * otherwise it is stripped like any other payload byte. `found` reports only
- * categories actually removed, so a preserved joiner never makes the caller
- * claim a strip that did not happen, and a stuffed joiner channel surfaces as
- * CATEGORY.CF once it overruns the budget.
+ * The nearest code point right of index `i` that is not a variation selector, or
+ * "" at the string end. Mirror of {@link leftNonSelector}: an emoji ZWJ can be
+ * followed by a selector before the next component's base pictograph, so the
+ * joiner's real right neighbor is found by stepping over any variation
+ * selector(s).
+ * @param {string[]} cps
+ * @param {number} i
+ * @returns {string}
+ */
+function rightNonSelector(cps, i) {
+  let p = i + 1;
+  while (p < cps.length && VARIATION_SELECTOR.test(cps[p])) p++;
+  return cps[p] ?? "";
+}
+
+/**
+ * Mark every index that belongs to a well-formed emoji tag sequence (subregional
+ * flag): a U+1F3F4 tag_base, then one or more tag chars in U+E0020–U+E007E, then
+ * U+E007F CANCEL TAG. Only the tag chars and the terminating CANCEL are marked
+ * (the base is a visible pictograph). A run missing the CANCEL, or with no tag
+ * char before it, is malformed and left unmarked so it is stripped (fail closed).
+ * @param {string[]} cps
+ * @returns {boolean[]} keep[i] true iff `cps[i]` is inside a valid tag sequence
+ */
+function markTagSequences(cps) {
+  const keep = new Array(cps.length).fill(false);
+  /** @param {number} k @returns {number} */
+  const cpAt = (k) => /** @type {number} */ (cps[k].codePointAt(0));
+  for (let i = 0; i < cps.length; i++) {
+    if (cpAt(i) !== TAG_BASE) continue;
+    let j = i + 1;
+    while (j < cps.length && cpAt(j) >= TAG_SPEC_MIN && cpAt(j) <= TAG_SPEC_MAX)
+      j++;
+    // Require ≥1 spec tag char (j advanced past i+1) AND a terminating CANCEL.
+    if (j > i + 1 && j < cps.length && cpAt(j) === TAG_CANCEL) {
+      for (let k = i + 1; k <= j; k++) keep[k] = true;
+      i = j; // resume after the consumed sequence
+    }
+  }
+  return keep;
+}
+
+/**
+ * True when `cps[i]` is a standardized variation selector (U+FE00–U+FE0D) whose
+ * immediately preceding code point forms a REGISTERED standardized variation
+ * sequence (per the generated UCD table). Every unregistered FE00–FE0D selector
+ * stays payload.
+ * @param {string[]} cps @param {number} i
+ * @returns {boolean}
+ */
+function isStandardizedVariationSelector(cps, i) {
+  const cp = /** @type {number} */ (cps[i].codePointAt(0));
+  if (cp < 0xfe00 || cp > 0xfe0d) return false;
+  const prev = cps[i - 1];
+  return prev
+    ? isStandardizedVariant(/** @type {number} */ (prev.codePointAt(0)), cp)
+    : false;
+}
+
+/**
+ * True when `cps[i]` is an ideographic variation selector (VS17–VS256,
+ * U+E0100–U+E01EF) immediately after a CJK ideograph — the registry-faithful
+ * structural gate for an ideographic variation sequence.
+ * @param {string[]} cps @param {number} i
+ * @returns {boolean}
+ */
+function isIdeographicVariationSelector(cps, i) {
+  const cp = /** @type {number} */ (cps[i].codePointAt(0));
+  if (cp < IVS_MIN || cp > IVS_MAX) return false;
+  const prev = cps[i - 1];
+  return prev
+    ? isCjkIdeograph(/** @type {number} */ (prev.codePointAt(0)))
+    : false;
+}
+
+/**
+ * True when `cps[i]` is a Braille blank (U+2800) or a Hangul filler that sits
+ * next to a real, script-appropriate visible neighbour — a genuine empty Braille
+ * cell or archaic-Korean filler, not a hidden run. The zero-width Mn marks in
+ * BLANK_NON_CF have no such anchored use and are never preserved here.
+ * @param {string[]} cps @param {number} i
+ * @returns {boolean}
+ */
+function isPreservedBlankFiller(cps, i) {
+  const cp = /** @type {number} */ (cps[i].codePointAt(0));
+  const prev = cps[i - 1] ?? "";
+  const next = cps[i + 1] ?? "";
+  if (cp === BRAILLE_BLANK) return isBrailleCell(prev) || isBrailleCell(next);
+  if (HANGUL_FILLERS.has(cp)) return isHangul(prev) || isHangul(next);
+  return false;
+}
+
+/**
+ * Carve-out strip (an invisible the carve-out might preserve is present): walk
+ * code points, preserving a joiner/selector/tag/blank-filler only where its
+ * `kind` is set AND the text stays under the scatter floor AND neither the
+ * per-cluster (CONSECUTIVE_JOINER_CAP) nor the document-wide
+ * (TOTAL_PRESERVED_JOINER_BUDGET) preserve limit is hit — otherwise it is
+ * stripped like any other payload byte. A tag (subregional-flag) sequence is
+ * preserved-or-stripped ATOMICALLY: preserving only part of it would leave a
+ * malformed run the next pass strips, breaking idempotence. `found` reports only
+ * categories actually removed, so a preserved char never makes the caller claim
+ * a strip that did not happen, and a stuffed channel surfaces as its category
+ * once it overruns the budget.
  * @param {string} body
  * @returns {{ cleaned: string, found: string[] }}
  */
@@ -456,7 +661,8 @@ function carveStrip(body) {
   // Pass 1: classify + evaluate the gate once (see analyzeCarve). Only PAYLOAD
   // invisibles count toward the scatter floor, so a meaningful-joiner-dense text
   // (formal Persian, a long Devanagari conjunct run) stays under it.
-  const { codes, kind, payloadInvis, visibleLen } = analyzeCarve(cps);
+  const { codes, kind, tagSpanLen, payloadInvis, visibleLen } =
+    analyzeCarve(cps);
   // SCATTERED_THRESHOLD is the floor on payload invisibles: past it the document
   // is drowning in hidden bytes, so the carve-out is off and even a meaningful
   // joiner is stripped (threshold-evasion catch — over-strip beats under).
@@ -470,16 +676,17 @@ function carveStrip(body) {
 
   const foundCodes = new Set();
   let out = "";
-  // Preserved JOINERS in the current uninterrupted cluster (emoji presentation
-  // selectors don't chain, so they are exempt). A genuine gap (two visible chars
-  // in a row — see prevVisible) resets it; past the cap the surplus is stripped.
+  // Preserved JOINERS in the current uninterrupted cluster (selectors/tags/blank
+  // fillers don't chain, so they are exempt). A genuine gap (two visible chars in
+  // a row — see prevVisible) resets it; past the cap the surplus is stripped.
   let joinerRun = 0;
-  // Preserved joiners/selectors across the WHOLE string — never reset at a gap,
-  // so it bounds the document-wide channel joinerRun cannot. Past maxPreserved a
-  // joiner is stripped and its category reported.
+  // Preserved chars across the WHOLE string — never reset at a gap, so it bounds
+  // the document-wide channel joinerRun cannot. Past maxPreserved a preserved
+  // char is stripped and its category reported.
   let preservedTotal = 0;
   let prevVisible = false;
-  for (let i = 0; i < cps.length; i++) {
+  let i = 0;
+  while (i < cps.length) {
     const code = codes[i];
     if (code === null) {
       // A visible char following another visible char is a real word/segment
@@ -487,6 +694,21 @@ function carveStrip(body) {
       if (prevVisible) joinerRun = 0;
       prevVisible = true;
       out += cps[i]; // ordinary visible character
+      i++;
+      continue;
+    }
+    // A tag (subregional-flag) sequence: atomic preserve-or-strip on the whole
+    // run so a budget cut can't leave a malformed partial run (idempotence).
+    if (kind[i] === "tag") {
+      const len = tagSpanLen[i];
+      const fits = allowCarveOut && preservedTotal + len <= maxPreserved;
+      for (let k = 0; k < len; k++) {
+        if (fits) out += cps[i + k];
+        else foundCodes.add(codes[i + k]);
+      }
+      if (fits) preservedTotal += len;
+      prevVisible = false; // the sequence keeps the cluster open
+      i += len;
       continue;
     }
     const joiner = kind[i] === "joiner";
@@ -500,10 +722,12 @@ function carveStrip(body) {
       preservedTotal++;
       prevVisible = false; // a joiner/selector keeps the cluster open
       out += cps[i];
+      i++;
       continue;
     }
     foundCodes.add(code);
     prevVisible = false; // a stripped invisible neither opens nor closes a gap
+    i++;
   }
   const found = CHECKS.filter(([code]) => foundCodes.has(code)).map(
     ([code]) => code,
@@ -511,13 +735,17 @@ function carveStrip(body) {
   return { cleaned: out, found };
 }
 
+// Any tag char (the whole U+E0000–U+E007F block is category Cf).
+const TAG_CHAR_RE = /[\u{E0000}-\u{E007F}]/u;
+
 /**
- * True when `body` holds at least one ZWNJ/ZWJ or presentation selector
- * (VS15 U+FE0E / VS16 U+FE0F) — anything the carve-out in {@link carveStrip}
- * might preserve. A lone pictograph + selector with no joiner ANYWHERE else in
- * the document (e.g. "I ❤️ pizza" or "I ❤︎ pizza") still needs the carve-out's
- * per-neighbor analysis, or bulkStrip strips the selector unconditionally and
- * corrupts a legitimate glyph.
+ * True when `body` holds anything the carve-out in {@link carveStrip} might
+ * preserve: a ZWNJ/ZWJ, ANY variation selector (a registered standardized or
+ * ideographic sequence, or an emoji presentation selector — VARIATION_SELECTOR
+ * covers FE00–FE0F and E0100–E01EF), a tag char (a subregional flag), or a
+ * gated blank filler (Braille/archaic-Hangul). Each needs the per-neighbor
+ * analysis, or bulkStrip would strip it unconditionally and corrupt a
+ * legitimate glyph.
  * @param {string} body
  * @returns {boolean}
  */
@@ -525,10 +753,28 @@ function needsCarveOut(body) {
   return (
     body.includes(String.fromCodePoint(ZWNJ)) ||
     body.includes(String.fromCodePoint(ZWJ)) ||
-    [...PRESENTATION_SELECTORS].some((cp) =>
-      body.includes(String.fromCodePoint(cp)),
-    )
+    VARIATION_SELECTOR.test(body) ||
+    TAG_CHAR_RE.test(body) ||
+    GATED_BLANK_RE.test(body)
   );
+}
+
+/**
+ * The `text` with every carve-out-PRESERVABLE invisible (joiners/selectors/tags/
+ * blank fillers doing real rendering work) replaced by a space, leaving only the
+ * PAYLOAD invisibles in place. The LONG_RUN injection probe runs over this so a
+ * legitimate emoji/flag/variation sequence never trips the "possible injection
+ * payload" marker (alert fatigue), while a genuine hidden run still surfaces.
+ * @param {string} text
+ * @returns {string}
+ */
+export function payloadInvisibleView(text) {
+  const cps = Array.from(text);
+  const { codes, kind } = analyzeCarve(cps);
+  let out = "";
+  for (let i = 0; i < cps.length; i++)
+    out += codes[i] !== null && kind[i] === null ? cps[i] : " ";
+  return out;
 }
 
 /**
@@ -538,11 +784,21 @@ function needsCarveOut(body) {
  * encode hidden instructions. ZWNJ/ZWJ survive only in a linguistic context
  * (see the carve-out above). `found` names exactly the categories stripped, so
  * a caller never warns about a strip the carve-out skipped.
+ *
+ * `originalText` is the pre-processing text (before any ANSI strip) used ONLY to
+ * decide whether a leading BOM is genuinely leading: an interior BOM that an
+ * ANSI-strip left at index 0 of `text` (e.g. `ESC[m + interior U+FEFF`) must NOT be treated as a
+ * legitimate leading marker. Defaults to `text` for the common single-arg call.
  * @param {string} text
+ * @param {string} [originalText]
  * @returns {{ cleaned: string, found: string[] }}
  */
-export function stripInvisibleWithReport(text) {
-  const hasLeadingBom = text.charCodeAt(0) === 0xfeff;
+export function stripInvisibleWithReport(text, originalText = text) {
+  // Leading only when the BOM leads the ORIGINAL text (not merely `text` after an
+  // ANSI strip shifted an interior BOM to index 0). The `text` guard keeps the
+  // slice sound when the two disagree.
+  const hasLeadingBom =
+    originalText.charCodeAt(0) === 0xfeff && text.charCodeAt(0) === 0xfeff;
   const body = hasLeadingBom ? text.slice(1) : text;
   const { cleaned, found } = needsCarveOut(body)
     ? carveStrip(body)

@@ -51,6 +51,18 @@ const KEEP_TOKENS = [
   cp(0x645) + cp(0x6cc) + ZWNJ + cp(0x62e),
   // "क्‍ष" — ZWJ after a Devanagari virama
   cp(0x915) + cp(0x94d) + ZWJ + cp(0x937),
+  // 🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland — a subregional-flag emoji tag sequence (base + gbsct + CANCEL)
+  cp(0x1f3f4) +
+    cp(0xe0067) +
+    cp(0xe0062) +
+    cp(0xe0073) +
+    cp(0xe0063) +
+    cp(0xe0074) +
+    cp(0xe007f),
+  // ∅︀ — a REGISTERED standardized variation sequence (EMPTY SET + VS1)
+  cp(0x2205) + cp(0xfe00),
+  // 葛󠄀 — an ideographic variation sequence (CJK ideograph + VS17)
+  cp(0x845b) + cp(0xe0100),
 ];
 
 // Known-bad markers: each must be GONE from the output. Wrapped in ASCII
@@ -79,15 +91,24 @@ const pieceGen = fc.oneof(
 
 const docGen = fc.array(pieceGen, { minLength: 1, maxLength: 8 });
 
+// Visible padding wrapped around and between every piece. Two jobs: it isolates
+// each token's boundary (no two constructs fuse into a joined cluster neither is
+// on its own — the property is about each construct's OWN correctness), AND it
+// gives the document-wide preserve budget headroom. That budget scales with
+// visible length (invisible.mjs), so a doc packed with many keep-tokens would
+// otherwise legitimately overrun it and strip a preserved char — real behavior,
+// but not the PRECISION bug this suite hunts. 64 visible chars per gap keeps the
+// budget comfortably above the most any doc here (≤8 pieces, ≤6 preserved per
+// piece for a subregional flag) can preserve, so a mangled keep token is always a
+// genuine precision failure rather than budget saturation.
+const PIECE_PAD = " ".repeat(64);
+
 describe("semantic-correctness fuzz: carve-out precision on mixed documents", () => {
   it("every generated real emoji/linguistic construct survives byte-for-byte", () => {
     fc.assert(
       fc.property(docGen, (pieces) => {
-        // A space between every piece isolates each token's boundary so no
-        // two generated constructs can incidentally fuse into a joined
-        // cluster that neither one is on its own — the property is about
-        // each construct's OWN correctness, not emergent cross-token joining.
-        const text = pieces.map((p) => p.t).join(" ");
+        const text =
+          PIECE_PAD + pieces.map((p) => p.t).join(PIECE_PAD) + PIECE_PAD;
         const cleaned = stripInvisible(text);
 
         for (const p of pieces) {
@@ -108,7 +129,7 @@ describe("semantic-correctness fuzz: carve-out precision on mixed documents", ()
           }
         }
       }),
-      fcRunOptions(),
+      fcRunOptions({ numRuns: 500 }),
     );
   });
 });

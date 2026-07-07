@@ -27,12 +27,22 @@ import {
   TOTAL_PRESERVED_JOINER_BUDGET,
   PRESERVED_JOINER_PER_VISIBLE,
   LINGUISTIC_SCRIPTS,
+  describeStripped,
+  payloadInvisibleView,
 } from "../src/invisible.mjs";
 import { applyLayer1, stripAnsiFully } from "../src/layer1.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
 
 const ZWNJ = cp(0x200c);
 const ZWJ = cp(0x200d);
+const CANCEL_TAG = cp(0xe007f);
+
+/** A subregional-flag emoji tag sequence: WAVING BLACK FLAG + tag chars for the
+ * ASCII `code` + CANCEL TAG. `tagCode("gbsct")` builds 🏴 Scotland. */
+const tagCode = (code) =>
+  cp(0x1f3f4) +
+  [...code].map((c) => cp(0xe0000 + c.charCodeAt(0))).join("") +
+  CANCEL_TAG;
 
 /** Count occurrences of a single-char needle in a string (joiner counting). */
 const countOf = (s, ch) => s.split(ch).length - 1;
@@ -847,6 +857,300 @@ describe("budget precision: legitimate joiners preserved and un-flagged", () => 
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, input);
     assert.deepEqual(found, []);
+  });
+});
+
+// ─── Emoji tag sequences (subregional flags) ──────────────────────────────────
+// A subregional flag is 🏴 (U+1F3F4) + tag chars (U+E0020–U+E007E) + CANCEL
+// (U+E007F). Only that exact grammar is preserved; every other tag char stays
+// stripped (tags are the top ASCII-smuggling vector, so preservation fails
+// closed on a malformed/partial run).
+describe("stripInvisible: emoji tag sequences (subregional flags)", () => {
+  for (const [name, code] of [
+    ["Scotland", "gbsct"],
+    ["Wales", "gbwls"],
+    ["England", "gbeng"],
+  ]) {
+    it(`preserves the ${name} flag tag sequence verbatim`, () => {
+      const flag = tagCode(code);
+      const { cleaned, found } = stripInvisibleWithReport(`a ${flag} b`);
+      assert.equal(cleaned, `a ${flag} b`);
+      assert.deepEqual(found, []);
+    });
+  }
+
+  it("strips a tag run missing the CANCEL terminator (bare flag remains)", () => {
+    // 🏴 + tag chars but NO U+E007F: malformed, so the tag chars are stripped
+    // and only the visible flag base survives (fail closed).
+    const input = cp(0x1f3f4) + cp(0xe0067) + cp(0xe0062) + cp(0xe0073);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x1f3f4));
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("strips a bare CANCEL with no tag base or tag chars before it", () => {
+    const input = `x${CANCEL_TAG}y`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "xy");
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("strips 🏴 immediately followed by CANCEL (no tag char between)", () => {
+    // Grammar needs ≥1 tag char before CANCEL; 🏴 + CANCEL is malformed.
+    const input = cp(0x1f3f4) + CANCEL_TAG;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x1f3f4));
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("strips loose tag chars not anchored to a flag base", () => {
+    // The classic ASCII-smuggling channel: tag chars with no 🏴 tag_base.
+    const input = "Q" + cp(0xe0041) + cp(0xe0070) + "K";
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "QK");
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("preserves the flag but strips a trailing loose tag char after CANCEL", () => {
+    const flag = tagCode("gbsct");
+    const input = flag + cp(0xe0041); // extra tag char past the terminator
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, flag);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("is idempotent on a mixed valid/invalid tag document", () => {
+    const input = `${tagCode("gbsct")} ${cp(0x1f3f4)}${cp(0xe0067)} tail`;
+    const once = stripInvisible(input);
+    assert.equal(stripInvisible(once), once);
+  });
+
+  it("atomically strips a well-formed flag once the preserve budget overruns", () => {
+    // Each 🏴gbsct sequence spends 6 tag units of the document-wide preserve
+    // budget (TOTAL_PRESERVED_JOINER_BUDGET = 16). Two flags fit (12 ≤ 16); the
+    // third's whole tag run overruns (18 > 16) and is stripped ATOMICALLY —
+    // never left as a malformed partial run — leaving only its bare flag base.
+    // Total tag chars (18) stay under the scatter floor, so this exercises the
+    // budget cut specifically, not the floor.
+    const flag = tagCode("gbsct");
+    const { cleaned, found } = stripInvisibleWithReport(
+      `${flag} ${flag} ${flag}`,
+    );
+    assert.equal(cleaned, `${flag} ${flag} ${cp(0x1f3f4)}`);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+});
+
+// ─── Standardized variation sequences (U+FE00–U+FE0D) ─────────────────────────
+// A selector in U+FE00–U+FE0D is preserved ONLY after a base that forms a
+// registered standardized variation sequence (per the generated UCD table);
+// every unregistered base+selector is stripped as a hidden VS.
+describe("stripInvisible: standardized variation sequences", () => {
+  for (const [name, base, selector] of [
+    ["EMPTY SET + VS1", 0x2205, 0xfe00],
+    ["DIGIT ZERO + VS1", 0x30, 0xfe00],
+    ["U+4E0D + VS1 (CJK compatibility)", 0x4e0d, 0xfe00],
+  ]) {
+    it(`preserves the registered sequence ${name}`, () => {
+      const input = cp(base) + cp(selector);
+      const { cleaned, found } = stripInvisibleWithReport(`x${input}y`);
+      assert.equal(cleaned, `x${input}y`);
+      assert.deepEqual(found, []);
+    });
+  }
+
+  it("strips an FE00 selector after an unregistered base", () => {
+    // 'a' + VS1 is not a registered sequence.
+    const input = `a${cp(0xfe00)}b`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "ab");
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
+  it("strips a wrong-selector variant of a registered base", () => {
+    // DIGIT ZERO is registered with VS1 (FE00), not VS14 (FE0D).
+    const input = cp(0x30) + cp(0xfe0d);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x30));
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
+  it("strips a stuffed run after a registered base, keeping only the first", () => {
+    // EMPTY SET + VS1 (registered) + 3 more VS1: only the first is adjacent to
+    // the base; the rest each sit behind a selector, so they are stripped.
+    const input = cp(0x2205) + cp(0xfe00).repeat(4);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x2205) + cp(0xfe00));
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+});
+
+// ─── Ideographic variation sequences (VS17–VS256, U+E0100–U+E01EF) ────────────
+// A selector in U+E0100–U+E01EF is preserved ONLY after a CJK ideograph (the
+// registry-faithful structural gate for an ideographic variation sequence).
+describe("stripInvisible: ideographic variation sequences", () => {
+  for (const [name, base] of [
+    ["U+845B 葛 (Unified)", 0x845b],
+    ["U+4E00 一 (Unified, block start)", 0x4e00],
+    ["U+3400 (Extension A start)", 0x3400],
+    ["U+20000 (Extension B start)", 0x20000],
+    ["U+FA0E (Compatibility Ideographs)", 0xfa0e],
+  ]) {
+    it(`preserves an ideographic selector after ${name}`, () => {
+      const input = cp(base) + cp(0xe0100);
+      const { cleaned, found } = stripInvisibleWithReport(`【${input}】`);
+      assert.equal(cleaned, `【${input}】`);
+      assert.deepEqual(found, []);
+    });
+  }
+
+  it("preserves the whole E0100–E01EF selector range after a CJK base", () => {
+    for (const sel of [0xe0100, 0xe0101, 0xe01ef]) {
+      const input = cp(0x845b) + cp(sel);
+      assert.equal(
+        stripInvisible(input),
+        input,
+        `selector U+${sel.toString(16)}`,
+      );
+    }
+  });
+
+  it("strips an ideographic selector after a non-CJK base", () => {
+    const input = `a${cp(0xe0100)}b`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "ab");
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
+  it("strips an ideographic selector after a Latin letter that looks like a base", () => {
+    // A ZWJ/selector run without a CJK anchor stays payload.
+    const input = cp(0x1f3f3) + cp(0xe0100); // pictograph, not a CJK ideograph
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x1f3f3));
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+});
+
+// ─── Blank-filler carve-out (Braille / archaic Hangul) ────────────────────────
+// U+2800 and the Hangul fillers are preserved only next to a real,
+// script-appropriate visible neighbour; a run (whose neighbours are fillers) or
+// an out-of-context filler is stripped. Zero-width Mn marks are never preserved.
+describe("stripInvisible: blank-filler carve-out", () => {
+  it("preserves a Braille blank between real Braille cells", () => {
+    const input = cp(0x2803) + cp(0x2800) + cp(0x2801);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  it("preserves a Hangul filler between Hangul syllables", () => {
+    const input = cp(0xac00) + cp(0x3164) + cp(0xac01);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  it("strips a Braille blank in non-Braille context", () => {
+    const input = `a${cp(0x2800)}b`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "ab");
+    assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+  });
+
+  it("strips a Hangul filler in non-Hangul context", () => {
+    const input = `c${cp(0x3164)}d`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "cd");
+    assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+  });
+
+  it("strips a run of Braille blanks down to the anchored ends only", () => {
+    // Neighbours of the interior blanks are themselves blanks (not cells), so
+    // only the two blanks touching a real cell survive — the run-length gate.
+    const input = cp(0x2803) + cp(0x2800).repeat(5) + cp(0x2801);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x2803) + cp(0x2800) + cp(0x2800) + cp(0x2801));
+    assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+  });
+
+  it("strips a run of adjacent Hangul fillers — a filler can't anchor another", () => {
+    // Two U+3164 fillers touching only each other and non-Hangul text: neither
+    // has a real Hangul neighbour, so the "a filler cannot anchor another filler"
+    // guard rejects the self-anchor and the whole run is stripped (covert-channel
+    // collapse — mirrors the Braille run-length gate).
+    const input = `c${cp(0x3164)}${cp(0x3164)}d`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "cd");
+    assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+  });
+
+  it("never preserves a zero-width Mn mark even beside its own script", () => {
+    // U+034F CGJ between Hangul is still stripped — Mn zero-widths have no
+    // anchored blank-filler use.
+    const input = cp(0xac00) + cp(0x034f) + cp(0xac01);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0xac00) + cp(0xac01));
+    assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+  });
+});
+
+// ─── Interior BOM after an ANSI strip (applyLayer1, L4) ───────────────────────
+describe("applyLayer1: leading-BOM is decided from the original text", () => {
+  it("strips a BOM that was interior before the ANSI strip", () => {
+    // `ESC[m` + U+FEFF + text: the BOM is interior in the original, so even
+    // though the ANSI strip leaves it at index 0 it must be stripped, not kept.
+    const input = `${cp(0x1b)}[m${cp(0xfeff)}hello`;
+    const { cleaned } = applyLayer1(input);
+    assert.equal(cleaned, "hello");
+    assert.equal(cleaned.charCodeAt(0), "h".charCodeAt(0));
+  });
+
+  it("still preserves a genuinely leading BOM", () => {
+    const input = `${cp(0xfeff)}${cp(0x1b)}[mhello`;
+    const { cleaned } = applyLayer1(input);
+    assert.equal(cleaned, `${cp(0xfeff)}hello`);
+  });
+});
+
+// ─── ZWJ emoji sequence with a selector after the ZWJ (L5) ────────────────────
+describe("stripInvisible: ZWJ right-neighbour steps over a selector", () => {
+  it("preserves the ZWJ when a selector sits between it and the next pictograph", () => {
+    // base ZWJ VS16 pictograph: the ZWJ's real right neighbour is the pictograph,
+    // found by stepping over the selector (rightNonSelector). The ZWJ is kept;
+    // the stray VS16 (whose own left neighbour is the ZWJ, not a pictograph) is
+    // still stripped — the fix rescues the joiner, not a misplaced selector.
+    const input = cp(0x1f3f3) + ZWJ + cp(0xfe0f) + cp(0x1f308);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x1f3f3) + ZWJ + cp(0x1f308));
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+    assert.equal(countOf(cleaned, ZWJ), 1);
+  });
+});
+
+// ─── LONG_RUN injection probe ignores preserved invisibles (L6) ───────────────
+describe("payloadInvisibleView + describeStripped: preserved runs don't alert", () => {
+  it("payloadInvisibleView masks preserved chars and keeps payload", () => {
+    const flag = tagCode("gbsct");
+    const view = payloadInvisibleView(flag + cp(0x200b));
+    // The flag's tag chars are masked to spaces; only the ZWSP payload remains.
+    assert.equal(view.includes(cp(0xe0067)), false);
+    assert.equal(view.includes(cp(0x200b)), true);
+  });
+
+  it("no LONG RUN marker when a long invisible run is a preserved tag sequence", () => {
+    // A grammar-valid flag with 11 tag chars (> LONG_RUN_THRESHOLD) is preserved,
+    // so the injection marker must NOT fire even though a single ZWSP is stripped.
+    const bigFlag =
+      cp(0x1f3f4) + cp(0xe0041).repeat(LONG_RUN_THRESHOLD + 1) + CANCEL_TAG;
+    const deAnsi = bigFlag + cp(0x200b);
+    const note = describeStripped([CATEGORY.CF], deAnsi);
+    assert.doesNotMatch(note, /LONG RUN/);
+  });
+
+  it("still marks a genuine long payload run", () => {
+    const deAnsi = cp(0x200b).repeat(LONG_RUN_THRESHOLD + 2);
+    const note = describeStripped([CATEGORY.CF], deAnsi);
+    assert.match(note, /LONG RUN/);
   });
 });
 

@@ -148,8 +148,10 @@ export function applyLayer1(text) {
   const deAnsi = stripAnsiFully(text);
   // stripInvisibleWithReport returns `found` for exactly the categories it
   // removed — so a ZWNJ/ZWJ the carve-out PRESERVES never registers as a strip,
-  // and the leading-BOM exception is already handled inside it.
-  const { cleaned: afterInvis, found } = stripInvisibleWithReport(deAnsi);
+  // and the leading-BOM exception is already handled inside it. Pass the ORIGINAL
+  // `text` so a BOM that was interior before the ANSI strip (`ESC[m + interior U+FEFF`, now at
+  // index 0 of `deAnsi`) is treated as interior and stripped, not preserved.
+  const { cleaned: afterInvis, found } = stripInvisibleWithReport(deAnsi, text);
   let ansiFound = deAnsi.length !== text.length;
 
   let cleaned = afterInvis;
