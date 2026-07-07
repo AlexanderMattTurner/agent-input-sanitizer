@@ -924,6 +924,21 @@ describe("stripInvisible: emoji tag sequences (subregional flags)", () => {
     const once = stripInvisible(input);
     assert.equal(stripInvisible(once), once);
   });
+
+  it("atomically strips a well-formed flag once the preserve budget overruns", () => {
+    // Each 🏴gbsct sequence spends 6 tag units of the document-wide preserve
+    // budget (TOTAL_PRESERVED_JOINER_BUDGET = 16). Two flags fit (12 ≤ 16); the
+    // third's whole tag run overruns (18 > 16) and is stripped ATOMICALLY —
+    // never left as a malformed partial run — leaving only its bare flag base.
+    // Total tag chars (18) stay under the scatter floor, so this exercises the
+    // budget cut specifically, not the floor.
+    const flag = tagCode("gbsct");
+    const { cleaned, found } = stripInvisibleWithReport(
+      `${flag} ${flag} ${flag}`,
+    );
+    assert.equal(cleaned, `${flag} ${flag} ${cp(0x1f3f4)}`);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
 });
 
 // ─── Standardized variation sequences (U+FE00–U+FE0D) ─────────────────────────
@@ -1055,6 +1070,17 @@ describe("stripInvisible: blank-filler carve-out", () => {
     const input = cp(0x2803) + cp(0x2800).repeat(5) + cp(0x2801);
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, cp(0x2803) + cp(0x2800) + cp(0x2800) + cp(0x2801));
+    assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
+  });
+
+  it("strips a run of adjacent Hangul fillers — a filler can't anchor another", () => {
+    // Two U+3164 fillers touching only each other and non-Hangul text: neither
+    // has a real Hangul neighbour, so the "a filler cannot anchor another filler"
+    // guard rejects the self-anchor and the whole run is stripped (covert-channel
+    // collapse — mirrors the Braille run-length gate).
+    const input = `c${cp(0x3164)}${cp(0x3164)}d`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "cd");
     assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
   });
 
