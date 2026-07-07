@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests._helpers import REPO_ROOT
+
 SESSION_SETUP = REPO_ROOT / ".claude" / "hooks" / "session-setup.sh"
 
 
@@ -27,6 +28,39 @@ def sandbox(tmp_path: Path) -> Path:
 
 def set_remote(sandbox: Path, url: str) -> None:
     subprocess.run(["git", "remote", "add", "origin", url], cwd=sandbox, check=True)
+
+
+# The install section of session-setup.sh curls webi installers and shells out
+# to apt-get/uv/pnpm to fetch tools. Left unstubbed, the smoke test would reach
+# the network (non-hermetic, flaky, slow). Prepending a directory of these stubs
+# to PATH neutralizes the whole section: the tool stubs (shfmt/gh/jq/shellcheck)
+# make `command -v` succeed so their install branch is skipped, and the
+# installer stubs (curl/apt-get/uv/pnpm/npm) are local no-ops if anything still
+# invokes them. The script then runs its git/GH_REPO logic — what these tests
+# actually exercise — without a single outbound call. (This stands alone and
+# does not depend on any script-side skip flag.)
+_INERT_COMMANDS = (
+    "curl",
+    "apt-get",
+    "uv",
+    "pnpm",
+    "npm",
+    "shfmt",
+    "gh",
+    "jq",
+    "shellcheck",
+)
+
+
+def _write_installer_stubs(stub_dir: Path) -> Path:
+    """Write exit-0 stubs for every network/installer command onto a dir that
+    callers prepend to PATH; return the dir."""
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    for name in _INERT_COMMANDS:
+        stub = stub_dir / name
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        stub.chmod(0o755)
+    return stub_dir
 
 
 def run_session_setup(
@@ -57,6 +91,9 @@ def run_session_setup(
     )
     if extra_env:
         env.update(extra_env)
+    # Neutralize the install section: no outbound curl / apt-get / uv / pnpm.
+    stub_dir = _write_installer_stubs(sandbox / "_installer_stubs")
+    env["PATH"] = f"{stub_dir}{os.pathsep}{env.get('PATH', os.environ['PATH'])}"
     result = subprocess.run(
         ["bash", str(sandbox / ".claude" / "hooks" / "session-setup.sh")],
         env=env,

@@ -126,8 +126,34 @@ def test_bind_or_exit_returns_false_when_live_daemon_owns_path(sock_dir):
             assert S._bind_or_exit(second, socket_path) is False
         finally:
             second.close()
-        # And a full second serve() likewise returns without taking over.
-        S.serve(socket_path, threading.Event())  # returns because path is live
+        # And a full second serve() likewise returns without taking over. Run it
+        # in a helper thread with a bounded join so a regression that blocks
+        # (e.g. taking over the live socket instead of bailing) surfaces as a
+        # failed assertion, not a silent hang that wedges the whole suite.
+        second_serve = threading.Thread(
+            target=S.serve, args=(socket_path, threading.Event()), daemon=True
+        )
+        second_serve.start()
+        # Bound generously: a cold serve() re-runs configure_plugins + a warm-up
+        # scan before it can bail on the live path (the sibling daemon-start
+        # tests allow 10s just for the socket to appear), so a short join could
+        # flake on slow CI while still not being an unbounded hang.
+        second_serve.join(timeout=30)
+        assert not second_serve.is_alive(), (
+            "second serve() must return because the path is live, not block"
+        )
+        # Non-vacuous positive marker: the ORIGINAL daemon still owns the socket
+        # and answers — proving the second serve() bailed without disturbing it,
+        # rather than the assertion passing because nothing was ever serving.
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.connect(socket_path)
+            body = json.dumps({"text": "key: AKIAIOSFODNN7EXAMPLE"}).encode("utf-8")
+            client.sendall(struct.pack(">I", len(body)) + body)
+            client.settimeout(5)
+            assert "AWS Access Key" in _drain(client)["found"]
+        finally:
+            client.close()
     finally:
         stop.set()
         thread.join(timeout=5)
