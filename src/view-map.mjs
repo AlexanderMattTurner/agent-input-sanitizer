@@ -34,6 +34,30 @@ export function occurrences(haystack, needle) {
 }
 
 /**
+ * Count of ALL matches of `needle` in `haystack`, including self-overlapping
+ * ones (stepping by 1, not by the needle length). `occurrences` deliberately
+ * steps by the needle length so it never reports overlapping spans — correct
+ * for splicing, but it undercounts a self-overlapping needle (e.g. "aa" in
+ * "aaa" is one non-overlapping match yet two overlapping ones). Ambiguity
+ * gating must use THIS count: an old_string that overlaps itself has more than
+ * one anchor a human (or the real Edit tool) could mean, so it is ambiguous even
+ * when `occurrences` reports a single non-overlapping match.
+ * @param {string} haystack
+ * @param {string} needle
+ * @returns {number}
+ */
+export function overlapAwareCount(haystack, needle) {
+  if (needle === "") return 0;
+  let count = 0;
+  let i = haystack.indexOf(needle);
+  while (i !== -1) {
+    count++;
+    i = haystack.indexOf(needle, i + 1);
+  }
+  return count;
+}
+
+/**
  * The character runs Layer 1 deleted, located by greedy subsequence alignment
  * (stripping only deletes, so `cleaned` is always a subsequence of `content`).
  * Throws if the subsequence property does not hold — the caller fails closed.
@@ -103,7 +127,22 @@ export function pairsToUtf16(text, pairs) {
   prefix[0] = 0;
   for (let i = 0; i < codePoints.length; i++)
     prefix[i + 1] = prefix[i] + codePoints[i].length;
-  return pairs.map((pair) => ({ ...pair, start: prefix[pair.start] }));
+  return pairs.map((pair) => {
+    // A redactor offset outside [0, codePoints.length] indexes `prefix` out of
+    // range and would silently yield `start: undefined`, which then poisons
+    // every downstream offset comparison (undefined < n is always false) and
+    // mis-anchors or corrupts the edit. Fail loudly instead — an out-of-range
+    // pair means the injected redactor's map contract was violated.
+    if (
+      !Number.isInteger(pair.start) ||
+      pair.start < 0 ||
+      pair.start > codePoints.length
+    )
+      throw new Error(
+        `redaction pair start ${pair.start} is out of range [0, ${codePoints.length}]`,
+      );
+    return { ...pair, start: prefix[pair.start] };
+  });
 }
 
 /**
@@ -177,12 +216,38 @@ export function resolveSpan(
  * @param {string[]} needles
  * @returns {{text: string, index: number}[]}
  */
-function orderedMatches(text, needles) {
+export function orderedMatches(text, needles) {
   const out = [];
   for (const needle of needles)
     for (const index of occurrences(text, needle))
       out.push({ text: needle, index });
   return out.sort((left, right) => left.index - right.index);
+}
+
+/**
+ * On-disk [start, end) span of every redaction pair, mapped from its view
+ * offset through placeholder expansion (view → cleaned) and stripped invisible
+ * runs (cleaned → disk). A run abutting the secret stays outside its span (it
+ * was never part of the secret); interior runs are included. Callers use these
+ * to detect an edit whose on-disk footprint intrudes into bytes the model was
+ * never shown.
+ * @param {{pairs: {placeholder: string, original: string, start: number}[]}} view
+ * @param {{start: number, deleted: string}[]} deletions
+ * @returns {{start: number, end: number}[]}
+ */
+export function pairDiskSpans(view, deletions) {
+  return view.pairs.map((pair) => {
+    // pair.start is a placeholder boundary; placeholders never overlap, so it is
+    // never strictly interior to another placeholder and mapViewOffset resolves.
+    const cleanedStart = mapViewOffset(view.pairs, pair.start);
+    if (cleanedStart === null)
+      throw new Error("redaction pair start maps inside another placeholder");
+    const cleanedEnd = cleanedStart + pair.original.length;
+    return {
+      start: diskOffset(deletions, cleanedStart, false),
+      end: diskOffset(deletions, cleanedEnd, true),
+    };
+  });
 }
 
 /**
@@ -241,8 +306,13 @@ export function rehydrateNewString(oldS, newS, spanPairs, filePairs) {
     };
   }
 
-  let out = newS;
-  const secrets = [];
+  // Each placeholder text must name exactly one secret; resolve that mapping
+  // first, then splice in a SINGLE ordered pass. A chained
+  // `out.split(ph).join(secret)` per placeholder is unsound: an inserted secret
+  // whose bytes happen to contain a later placeholder text would be re-matched
+  // and corrupted (or partially exposed) by the next split. One pass over the
+  // ordered match positions only ever touches the original new_string bytes.
+  const valueByPh = new Map();
   for (const phText of new Set(newSeq.map((match) => match.text))) {
     const values = [
       ...new Set(
@@ -258,8 +328,13 @@ export function rehydrateNewString(oldS, newS, spanPairs, filePairs) {
           `and new_string changes their count or order; keep each one in place, or ` +
           `edit them one at a time with unique surrounding context`,
       };
-    out = out.split(phText).join(values[0]);
-    secrets.push(values[0]);
+    valueByPh.set(phText, values[0]);
   }
-  return { text: out, secrets };
+  let out = "";
+  let last = 0;
+  for (const match of newSeq) {
+    out += newS.slice(last, match.index) + valueByPh.get(match.text);
+    last = match.index + match.text.length;
+  }
+  return { text: out + newS.slice(last), secrets: [...valueByPh.values()] };
 }

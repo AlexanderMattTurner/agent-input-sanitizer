@@ -402,7 +402,13 @@ describe("rehydrate: gating", () => {
           new_string: "x",
           new_source: `v=${PH}`,
         },
-        { readFile: () => "plain\n", redactMap: () => mkView("plain\n", []) },
+        {
+          readFile: () => "plain\n",
+          redactMap: () => mkView("plain\n", []),
+          // Hint-free Edit on a Layer-1-clean file: the R1 secrets-present probe
+          // (io.redact) runs before the redactor's map mode; no secrets here.
+          redact: () => null,
+        },
       ),
       null,
     );
@@ -1041,6 +1047,247 @@ describe("rehydrate: Write", () => {
       { hint: "[REDACTED" },
     );
     assert.match(out.context, /\[REDACTED…\] placeholders/);
+  });
+});
+
+// ─── Hidden-span safety: no edit may read/split bytes inside a redacted span ──
+//
+// Core invariant (R1/R2/R5): for a file holding a redacted secret, no Edit or
+// Write — hinted or not, replace_all or not, self-overlapping or not — may
+// read, split, or mutate a byte INSIDE the secret's on-disk span unless the
+// model supplied the whole secret itself. Every such attempt must DENY, never
+// pass through to a raw disk edit (a char-by-char extraction oracle) or rewrite
+// that splices hidden bytes.
+
+describe("rehydrate: hidden-span safety", () => {
+  // SECRET_A === "hunter2hunter2hunter2xA": "hunter" appears 3× inside it and
+  // "2xA" appears only there — perfect probes for bytes the view hides as PH.
+  const FRAGMENT_ONLY_IN_SECRET = "2xA";
+  const FRAGMENT_VISIBLE_AND_IN_SECRET = "hunter";
+
+  it("R1: denies a hint-free Edit whose old_string matches ONLY inside a redacted secret", async () => {
+    const content = `PASSWORD=${SECRET_A}\nDEBUG=1\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: FRAGMENT_ONLY_IN_SECRET,
+        new_string: `${FRAGMENT_ONLY_IN_SECRET}\nEXTRA=1`,
+      },
+      liveIo(content, [{ value: SECRET_A, placeholder: PH }], reRedact),
+    );
+    assert.match(out.deny, /inside a \[REDACTED…\] redacted secret/);
+    assert.match(out.deny, /hidden from your view/);
+    assert.equal(out.updatedInput, undefined);
+  });
+
+  it("R1: denies a hint-free replace_all fragment that would splice inside the secret", async () => {
+    // "2xA" is hint-free, invisible in the view, but on disk sits inside the
+    // secret. replace_all would splice it there; deny (viewOcc===0 branch).
+    const content = `PASSWORD=${SECRET_A}\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: FRAGMENT_ONLY_IN_SECRET,
+        new_string: "Z",
+        replace_all: true,
+      },
+      liveIo(content, [{ value: SECRET_A, placeholder: PH }], reRedact),
+    );
+    assert.match(out.deny, /hidden from your view/);
+  });
+
+  it("R1: does NOT deny a hint-free Edit whose old_string wholly contains the secret (rotation)", async () => {
+    // The model supplied the secret's own bytes (e.g. a rotation): it extracts
+    // nothing, so this is left to pass through (null), not falsely denied.
+    const content = `PASSWORD=${SECRET_A}\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: `PASSWORD=${SECRET_A}`,
+        new_string: "PASSWORD=rotated",
+      },
+      liveIo(content, [{ value: SECRET_A, placeholder: PH }], reRedact),
+    );
+    assert.equal(out, null);
+  });
+
+  it("R2: denies a replace_all whose resolved bytes occur more often on disk than in the view", async () => {
+    const content = `note ${FRAGMENT_VISIBLE_AND_IN_SECRET} x\nPASSWORD=${SECRET_A}\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: FRAGMENT_VISIBLE_AND_IN_SECRET,
+        new_string: "HUNTER",
+        replace_all: true,
+      },
+      liveIo(content, [{ value: SECRET_A, placeholder: PH }], reRedact),
+    );
+    assert.match(out.deny, /replace_all would rewrite \d+ on-disk occurrence/);
+    assert.match(out.deny, /hidden inside redacted secrets or stripped/);
+    assert.equal(out.updatedInput, undefined);
+  });
+
+  it("R2: allows a replace_all when every disk occurrence is visible in the view", async () => {
+    // "PASSWORD=[REDACTED]" resolves to the same disk bytes at both spots and
+    // the resolved bytes occur exactly twice on disk — no hidden occurrence.
+    const src = `PASSWORD=${SECRET_A}\nPASSWORD=${SECRET_A}\n`;
+    const vw = mkView(src, [{ value: SECRET_A, placeholder: PH }]);
+    const out = await rehydrateRedacted(
+      "Edit",
+      {
+        file_path: "/f",
+        old_string: `PASSWORD=${PH}`,
+        new_string: `PASSWD=${PH}`,
+        replace_all: true,
+      },
+      fakeIo(src, vw, reRedact),
+    );
+    assert.equal(out.updatedInput.old_string, `PASSWORD=${SECRET_A}`);
+  });
+
+  it("R5: denies a self-overlapping hint-free old_string the >1 gate would miss", async () => {
+    // A trailing ZW makes the view diverge from disk so the edit reaches the
+    // resolver; "aa" in "aaa" is one non-overlapping match but two overlapping
+    // anchors — ambiguous, so deny.
+    const content = `aaa${ZW}\n`;
+    const out = await rehydrateRedacted(
+      "Edit",
+      { file_path: "/f", old_string: "aa", new_string: "bb" },
+      liveIo(content),
+    );
+    assert.match(out.deny, /matches 2 locations/);
+    assert.match(out.deny, /add surrounding context to make it unique/);
+  });
+
+  it("R4: denies a hinted Write to a MISSING file instead of persisting the placeholder literally", async () => {
+    const enoentIo = {
+      readFile: () => {
+        throw fsError("ENOENT");
+      },
+      redactMap: () => {
+        throw new Error("redactMap must not be reached");
+      },
+      redact: () => null,
+    };
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/new", content: `secret: ${PH}\n` },
+      enoentIo,
+    );
+    assert.match(out.deny, /\/new does not exist/);
+    assert.match(
+      out.deny,
+      /cannot copy a placeholder from another file or context/,
+    );
+    assert.equal(out.updatedInput, undefined);
+  });
+
+  it("R4: still passes an Edit through on a missing file (Edit fails on its own)", async () => {
+    const enoentIo = {
+      readFile: () => {
+        throw fsError("ENOENT");
+      },
+      redactMap: () => {
+        throw new Error("redactMap must not be reached");
+      },
+      redact: () => null,
+    };
+    assert.equal(
+      await rehydrateRedacted(
+        "Edit",
+        { file_path: "/missing", old_string: `x ${PH}`, new_string: "y" },
+        enoentIo,
+      ),
+      null,
+    );
+  });
+});
+
+// ─── Write: cross-file / re-substitution safety (R3, R6) ─────────────────────
+
+describe("rehydrate: Write cross-file and re-substitution safety", () => {
+  it("R3: denies a Write that mixes a valid same-file placeholder with a FOREIGN one", async () => {
+    // The file's own secret is under PH; PH_PEM shares the hint prefix but names
+    // no secret here (pasted from another file). The valid PH is substituted,
+    // but PH_PEM would survive verbatim — deny rather than persist it.
+    const src = `PASSWORD=${SECRET_A}\n`;
+    const vw = mkView(src, [{ value: SECRET_A, placeholder: PH }]);
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/f", content: `PASSWORD=${PH}\nKEY=${PH_PEM}\n` },
+      fakeIo(src, vw, reRedact),
+    );
+    assert.match(out.deny, /still carries a \[REDACTED…\] placeholder/);
+    assert.match(
+      out.deny,
+      /cannot copy a placeholder from another file or context/,
+    );
+    assert.equal(out.updatedInput, undefined);
+  });
+
+  it("R3: allows a Write whose only leftover hint-prefixed text is genuine prose the file already had", async () => {
+    // The file documents "[REDACTEDXYZ]" as prose — it shares the hint prefix
+    // "[REDACTED" but is NOT any placeholder (no "]" right after "REDACTED"), so
+    // it is not a redaction pair and does not collide with PH. Substituting the
+    // real secret leaves that prose token; R3 must count it as a pre-existing
+    // literal and NOT raise a cross-file deny.
+    const prose = "[REDACTEDXYZ]";
+    const src = `see ${prose} docs\nPW=${SECRET_A}\n`;
+    const vw = {
+      text: `see ${prose} docs\nPW=${PH}\n`,
+      pairs: [
+        {
+          placeholder: PH,
+          original: SECRET_A,
+          start: `see ${prose} docs\nPW=`.length,
+        },
+      ],
+    };
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/f", content: `see ${prose} docs\nPW=${PH}\n` },
+      fakeIo(src, vw, reRedact),
+    );
+    assert.equal(
+      out.updatedInput.content,
+      `see ${prose} docs\nPW=${SECRET_A}\n`,
+    );
+  });
+
+  it("R6: a Write substitutes in one pass, never re-touching an inserted secret's bytes", async () => {
+    // SECRET_A's bytes literally contain PH_PEM's placeholder text. A chained
+    // split(PH).join(secret) then split(PH_PEM).join(secretB) would clobber the
+    // PH_PEM substring inside the just-inserted secret; one pass must not.
+    const SECRET_WITH_PH = `pre${PH_PEM}post`;
+    const src = `A=${SECRET_WITH_PH}\nB=${SECRET_C}\n`;
+    const vw = {
+      text: `A=${PH}\nB=${PH_PEM}\n`,
+      pairs: [
+        { placeholder: PH, original: SECRET_WITH_PH, start: 2 },
+        {
+          placeholder: PH_PEM,
+          original: SECRET_C,
+          start: `A=${PH}\nB=`.length,
+        },
+      ],
+    };
+    const reRedactMix = (text) =>
+      text.split(SECRET_WITH_PH).join(PH).split(SECRET_C).join(PH_PEM);
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/f", content: `A=${PH}\nB=${PH_PEM}\n` },
+      fakeIo(src, vw, reRedactMix),
+    );
+    assert.equal(
+      out.updatedInput.content,
+      `A=${SECRET_WITH_PH}\nB=${SECRET_C}\n`,
+    );
+    // The PH_PEM text survives verbatim inside the inserted secret (not clobbered).
+    assert.ok(out.updatedInput.content.includes(SECRET_WITH_PH));
   });
 });
 

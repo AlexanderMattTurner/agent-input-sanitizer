@@ -49,10 +49,13 @@
 import { applyLayer1, LONE_SURROGATE_RE } from "./layer1.mjs";
 import {
   occurrences,
+  overlapAwareCount,
+  orderedMatches,
   alignDeletions,
   resolveSpan,
   rehydrateNewString,
   pairsToUtf16,
+  pairDiskSpans,
 } from "./view-map.mjs";
 
 // Cheap gate: every redaction placeholder the canonical redactor emits starts
@@ -171,6 +174,31 @@ async function rehydrateEdit(
     // secret elsewhere in the file is denied with guidance instead of being
     // written out literally.
     if (content.includes(oldS)) {
+      // R1: the old_string is invisible in the model's view yet matches disk.
+      // If a disk match cuts INTO a redacted secret's on-disk span without
+      // covering the whole secret, the model is targeting bytes it never saw —
+      // a stray match, or a probe (`old:"-" → "\n-"`) that splits the secret so
+      // the next redaction pass stops matching it, leaking it. That is never a
+      // legitimate re-anchor; fail closed. A match that WHOLLY contains a secret
+      // (the model supplied the secret's real bytes itself, e.g. a rotation)
+      // extracts nothing and is left to the literal resolver below.
+      const diskSpans = pairDiskSpans(view, deletions);
+      const intrudes = occurrences(content, oldS).some((matchStart) => {
+        const matchEnd = matchStart + oldS.length;
+        return diskSpans.some(
+          (secret) =>
+            matchStart < secret.end &&
+            secret.start < matchEnd &&
+            !(matchStart <= secret.start && secret.end <= matchEnd),
+        );
+      });
+      if (intrudes)
+        return {
+          deny:
+            `old_string matches bytes inside a ${hint}…] redacted secret in ` +
+            `${ti.file_path} that are hidden from your view; edit only text you can ` +
+            `see (include each placeholder whole), or ask the user to make this change`,
+        };
       const literalRes = rehydrateNewString(
         oldS,
         ti.new_string,
@@ -188,10 +216,15 @@ async function rehydrateEdit(
         `view of ${ti.file_path}; re-read the file and copy the placeholder text exactly`,
     };
   }
-  if (viewOcc.length > 1 && !ti.replace_all)
+  // R5: `occurrences` steps by the needle length, so a self-overlapping
+  // old_string ("aa" in "aaa") reports a single match and would slip past the
+  // >1 gate — yet it has multiple anchors the view can differ from disk at.
+  // Count with overlap awareness so the ambiguity is caught.
+  const viewMatchCount = overlapAwareCount(view.text, oldS);
+  if (viewMatchCount > 1 && !ti.replace_all)
     return {
       deny:
-        `old_string matches ${viewOcc.length} locations in the sanitized view of ` +
+        `old_string matches ${viewMatchCount} locations in the sanitized view of ` +
         `${ti.file_path}, and the view can differ from disk at each (redacted ` +
         `secrets, stripped invisible characters); add surrounding context to make it unique`,
     };
@@ -223,6 +256,22 @@ async function rehydrateEdit(
   // Identical view spans hide identical disk text, so every span carries the
   // same placeholder/original sequence — resolve new_string against the first.
   const span = spans[0];
+  // R2: replace_all rewrites EVERY on-disk occurrence of the resolved bytes, but
+  // only the sanitized-view occurrences were vetted. Each view occurrence maps to
+  // exactly one disk occurrence, so a larger disk count means extra matches exist
+  // where the view can't show them — inside a redacted secret's on-disk span, or
+  // a stripped run. real Edit would splice those hidden bytes too (splitting a
+  // secret so the redactor stops matching it, or corrupting it); fail closed.
+  const diskMatchCount = occurrences(content, span.diskText).length;
+  if (ti.replace_all && diskMatchCount !== viewOcc.length)
+    return {
+      deny:
+        `replace_all would rewrite ${diskMatchCount} on-disk occurrence(s) of the matched ` +
+        `text but only ${viewOcc.length} are visible in the sanitized view of ` +
+        `${ti.file_path}; the rest are hidden inside redacted secrets or stripped ` +
+        `characters. Edit each visible occurrence separately with unique context, or ask ` +
+        `the user to make this change`,
+    };
   // Soundness gate (see resolveSpan): greedy deletion alignment can anchor a
   // view span to the wrong disk bytes when a stripped run abuts kept text it
   // resembles. Refuse on either symptom:
@@ -319,8 +368,11 @@ async function rehydrateWrite(ti, view, io, hint) {
         `Edit instead, or write the secret's real value directly`,
     };
 
-  let out = ti.content;
-  const secrets = [];
+  // Resolve each of this file's placeholder texts to its single secret first,
+  // then splice in ONE ordered pass (R6). A chained `out.split(ph).join(secret)`
+  // per placeholder is unsound: an inserted secret whose bytes contain a later
+  // placeholder text would be re-matched and corrupted by the next split.
+  const valueByPh = new Map();
   for (const phText of texts) {
     const produced = view.pairs.filter((pair) => pair.placeholder === phText);
     if (occurrences(view.text, phText).length > produced.length)
@@ -338,9 +390,41 @@ async function rehydrateWrite(ti, view, io, hint) {
           `so a whole-file Write cannot tell which is which; use Edit with unique ` +
           `surrounding context for each`,
       };
-    out = out.split(phText).join(values[0]);
-    secrets.push(values[0]);
+    valueByPh.set(phText, values[0]);
   }
+  const matches = orderedMatches(ti.content, texts);
+  let out = "";
+  let last = 0;
+  // Hint occurrences introduced BY the substituted secrets (a pathological
+  // secret whose bytes contain the hint prefix), weighted by how many times each
+  // secret was inserted — so they are not later misread as foreign placeholders.
+  let secretHintCount = 0;
+  for (const match of matches) {
+    const secret = valueByPh.get(match.text);
+    out += ti.content.slice(last, match.index) + secret;
+    last = match.index + match.text.length;
+    secretHintCount += occurrences(secret, hint).length;
+  }
+  out += ti.content.slice(last);
+  const secrets = [...valueByPh.values()];
+
+  // R3: the new content may mix a valid same-file placeholder (substituted
+  // above) with a FOREIGN one — a placeholder pasted from another file/context
+  // that shares the hint prefix but is not one of this file's own. Those were
+  // left untouched and would be persisted verbatim over a real secret. After
+  // substitution, allow only the hint occurrences that genuinely exist as
+  // literal prose in the file's own view; any surplus is an unresolved foreign
+  // placeholder, so deny with the same cross-file guidance.
+  const literalHintCount =
+    occurrences(view.text, hint).length - view.pairs.length;
+  if (occurrences(out, hint).length - secretHintCount > literalHintCount)
+    return {
+      deny:
+        `the new content still carries a ${hint}…] placeholder that does not match any ` +
+        `secret in ${ti.file_path}, so a whole-file Write cannot copy a placeholder from ` +
+        `another file or context; request the source file's content and rehydrate a ` +
+        `same-file Edit instead, or write the secret's real value directly`,
+    };
 
   const exposed = await exposedSecrets(secrets, view.text, out, io);
   if (exposed > 0) return { deny: exposureDeny(exposed) };
@@ -424,11 +508,24 @@ export async function rehydrateRedacted(
     // promises Node-shaped read failures (a real `readFile`'s throw), so
     // narrow once here rather than re-deriving the cast at every use below.
     const nodeErr = /** @type {NodeJS.ErrnoException} */ (err);
-    // ENOENT (missing target): an Edit fails on its own; a Write creates a
-    // new file whose placeholder text can only be literal content. Pass
-    // through — this is the only read failure that genuinely means "nothing
-    // real is at risk here."
-    if (nodeErr?.code === "ENOENT") return null;
+    // ENOENT (missing target): an Edit fails on its own (nothing to
+    // re-anchor), so pass through. A Write, though, CREATES the file with its
+    // content verbatim — and a Write candidate is always hinted (isCandidate
+    // requires the hint prefix), so its placeholder stands for a secret that
+    // does NOT exist on this new path. R4: persisting "[REDACTED…]" literally
+    // there is the same cross-file/stale-placeholder mistake a same-file Write
+    // is denied for; refuse with the same guidance rather than write the
+    // placeholder text as a real value.
+    if (nodeErr?.code === "ENOENT") {
+      if (tool !== "Write") return null;
+      return {
+        deny:
+          `${toolInput.file_path} does not exist, so the ${hint}…] placeholder in the ` +
+          `new content stands for no secret on disk; a new file cannot copy a placeholder ` +
+          `from another file or context. Write the secret's real value directly, or ask ` +
+          `the user to make this change`,
+      };
+    }
     // Any OTHER read failure (EACCES, EMFILE, a transient I/O error, …) means
     // the target very likely still EXISTS with real bytes on disk — the read
     // failed, the file didn't vanish. A hinted call's content may carry
@@ -448,14 +545,18 @@ export async function rehydrateRedacted(
     };
   }
   const { layer1Cleaned, cleaned } = layer1View(content);
-  // A Layer-1-clean file's view differs from disk only at placeholders, which
-  // a hint-free old_string cannot touch: a verbatim match needs no
-  // translation, and a mismatch is an ordinary stale old_string Edit should
-  // report itself. Either way the redactor is skipped — and so is the
-  // exposure check (see the module doc's "Security invariant" scoping note):
-  // no placeholder is in play, so there is nothing this module could rehydrate
-  // to check for exposure.
-  if (!hinted && cleaned === content) return null;
+  // A Layer-1-clean file's view differs from disk ONLY at redacted secrets.
+  // R1: if nothing is redacted, a hint-free old_string cannot touch a hidden
+  // span, so keep the fast pass-through (a verbatim match needs no translation;
+  // a mismatch is an ordinary stale old_string Edit reports itself) and never
+  // invoke the redactor's map mode. But if the file DOES hold secrets, a
+  // hint-free old_string can still match disk bytes INSIDE a redacted span the
+  // model never saw — the char-by-char extraction oracle. Fall through to the
+  // resolver so its overlap/exposure guards run before any such byte is spliced
+  // raw. `io.redact` (plain mode) is the cheap secrets-present probe; it returns
+  // null exactly when the file has no secrets.
+  if (!hinted && cleaned === content && (await io.redact(cleaned)) === null)
+    return null;
 
   // alignDeletions needs a true subsequence of `content`; the lone-surrogate
   // normalization folded into `cleaned` is a substitution, not a deletion
