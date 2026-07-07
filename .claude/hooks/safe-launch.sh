@@ -66,6 +66,10 @@ is_under() {
   local candidate="$1" parent="$2" parent_dir resolved
   [[ -n "$candidate" ]] && [[ -n "$parent" ]] || return 1
   case "$candidate" in *..*) return 1 ;; esac
+  # The parent dir is resolved with `pwd -P`, but the leaf is not: a symlinked
+  # leaf (e.g. .claude/hooks/evil -> /etc/cron.d/x) would pass containment while
+  # writes land outside. Reject a symlinked leaf outright.
+  [[ -L "$candidate" ]] && return 1
   parent_dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
   [[ -n "$parent_dir" ]] || return 1
   resolved="$parent_dir/$(basename "$candidate")"

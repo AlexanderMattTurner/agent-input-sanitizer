@@ -166,12 +166,18 @@ remote_url="${remote_url:-$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/n
 if [[ "$remote_url" =~ 127\.0\.0\.1.*/git/ ]]; then
   local_settings="$PROJECT_DIR/.claude/settings.local.json"
   if [ ! -f "$local_settings" ]; then
+    # Grant self-edit only over non-executable Claude assets (skills), and
+    # explicitly DENY the paths that become code the next session executes:
+    # the hooks and the settings files themselves. A blanket Edit/Write(.claude/**)
+    # would let a prompt-injected session rewrite its own PreToolUse/SessionStart
+    # hooks — silent escalation to arbitrary code execution on the next launch.
+    # deny wins over allow, so the deny entries below are the hard boundary.
     cat >"$local_settings" <<'SETTINGS'
 {
   "permissions": {
     "allow": [
-      "Edit(.claude/**)",
-      "Write(.claude/**)",
+      "Edit(.claude/skills/**)",
+      "Write(.claude/skills/**)",
       "Read(.claude/**)",
       "Bash(pnpm build)",
       "Bash(pnpm check:*)",
@@ -181,6 +187,12 @@ if [[ "$remote_url" =~ 127\.0\.0\.1.*/git/ ]]; then
       "Bash(pnpm test:*)",
       "Bash(pre-commit run:*)",
       "Bash(uv run pytest:*)"
+    ],
+    "deny": [
+      "Edit(.claude/hooks/**)",
+      "Write(.claude/hooks/**)",
+      "Edit(.claude/settings*.json)",
+      "Write(.claude/settings*.json)"
     ]
   }
 }

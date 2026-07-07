@@ -50,8 +50,18 @@ for file in "$@"; do
     continue
   fi
 
-  # Extract frontmatter (between first and second ---), filtering YAML comments
-  frontmatter=$(awk '/^---$/{n++; next} n==1' "$file" | grep -v '^#')
+  # Extract frontmatter (between first and second ---), filtering YAML comments.
+  # A frontmatter that is entirely comments makes `grep -v '^#'` exit 1, which
+  # under `set -e` would abort the whole linter — branch on the exit code
+  # instead (grep exit 1 = "no non-comment lines", any other code = real error).
+  fm_raw=$(awk '/^---$/{n++; next} n==1' "$file")
+  if frontmatter=$(printf '%s\n' "$fm_raw" | grep -v '^#'); then
+    : # non-comment lines found
+  else
+    grep_rc=$? # exit status of the `if` condition = grep's (pipefail on)
+    [[ "$grep_rc" -eq 1 ]] || exit "$grep_rc"
+    frontmatter=""
+  fi
 
   # Check frontmatter has name field
   if ! echo "$frontmatter" | grep -q '^name:'; then
@@ -66,10 +76,20 @@ for file in "$@"; do
   fi
 
   # Check description is multi-sentence (at least 2 periods).
-  # Extract description from frontmatter only (not body content).
+  # Extract the description value (its line plus any indented continuation
+  # lines) from the frontmatter only. A sed range like /^description:/,/^[a-z]/p
+  # includes the *next* top-level key's line, so its periods leak into the
+  # count; instead, stop at — and exclude — the next top-level key.
   # `tr -dc` strips everything except '.', so a description with zero periods
   # still produces an empty (not failing) result — required under `pipefail`.
-  desc_block=$(awk '/^---$/{n++; next} n==1' "$file" | sed -n '/^description:/,/^[a-z]/p')
+  desc_block=$(awk '
+    /^---$/ { n++; next }
+    n == 1 {
+      if ($0 ~ /^description:/) { indesc = 1; print; next }
+      if (indesc && $0 ~ /^[A-Za-z][A-Za-z0-9_-]*:/) { indesc = 0 }
+      if (indesc) print
+    }
+  ' "$file")
   periods=$(printf '%s' "$desc_block" | tr -dc '.')
   if [[ "${#periods}" -lt 2 ]]; then
     echo "ERROR: $file description too short — use 2-3 sentences with specific activation triggers" >&2

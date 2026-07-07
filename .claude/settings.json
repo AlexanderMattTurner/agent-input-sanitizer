@@ -27,7 +27,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash(git push*|gh pr create*)",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
