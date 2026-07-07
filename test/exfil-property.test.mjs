@@ -65,14 +65,20 @@ const exfilCase = fc
       "html-a": `<a href="${url}">x</a>`,
       "html-img": `<img src="${url}">`,
     }[kind];
-    return { host, secret, doc };
+    return { host, doc, where };
   });
+
+const PLACEMENTS = ["query", "fragment", "path", "userinfo"];
 
 describe("property: detectExfil host never echoes the payload", () => {
   it("a flagged threat's target is the bare host, never the payload", () => {
-    let sawFlagged = 0;
+    // Per-PLACEMENT flagged counts, not a single run-wide counter: a run-wide
+    // count stays non-zero even if an entire placement (e.g. every `path` case)
+    // silently stopped flagging, making the property vacuous for it. Assert each
+    // placement flags at least once.
+    const flaggedByWhere = Object.fromEntries(PLACEMENTS.map((w) => [w, 0]));
     fc.assert(
-      fc.property(exfilCase, ({ host, doc }) => {
+      fc.property(exfilCase, ({ host, doc, where }) => {
         const threats = detectExfil(doc) ?? [];
         for (const threat of threats)
           assert.equal(
@@ -80,11 +86,15 @@ describe("property: detectExfil host never echoes the payload", () => {
             host,
             `target should be the bare host, got ${JSON.stringify(threat.target)}`,
           );
-        if (threats.length > 0) sawFlagged += 1;
+        if (threats.length > 0) flaggedByWhere[where] += 1;
       }),
       runOptions,
     );
-    assert.ok(sawFlagged > 0, "no doc was ever flagged — property vacuous");
+    for (const where of PLACEMENTS)
+      assert.ok(
+        flaggedByWhere[where] > 0,
+        `placement "${where}" never flagged — property vacuous there`,
+      );
   });
 });
 
