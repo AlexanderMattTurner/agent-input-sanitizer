@@ -333,18 +333,21 @@ export function scanInstructionFiles(globs, { cwd = process.cwd() } = {}) {
  * the renamed name pointing at unflushed/empty data or lose the rename itself.
  * The EXACT `mode` is applied with `fchmod` (openSync's create mode is
  * umask-masked, so it alone would drop bits), and a failed write/sync `unlink`s
- * the temp before rethrowing so no partial temp leaks. `tmpName` is injectable
- * for tests to force a known temp path; production callers never pass it.
+ * the temp before rethrowing so no partial temp leaks. `tmpName` and `remove`
+ * are injectable fault-injection seams for tests (force a known temp path; drive
+ * a cleanup-unlink failure); production callers never pass them.
  * @param {string} absPath
  * @param {string} data
  * @param {number} mode
  * @param {() => string} [tmpName]
+ * @param {(path: string) => void} [remove]
  */
 export function atomicReplaceFile(
   absPath,
   data,
   mode,
   tmpName = () => `.${randomBytes(12).toString("hex")}.tmp`,
+  remove = unlinkSync,
 ) {
   const dir = dirname(absPath);
   const tmp = join(dir, tmpName());
@@ -369,7 +372,7 @@ export function atomicReplaceFile(
   } catch (err) {
     closeSync(fd);
     try {
-      unlinkSync(tmp);
+      remove(tmp);
     } catch {
       // Best-effort cleanup only: rethrow the ORIGINAL failure below, not a
       // secondary unlink error, so the real cause stays loud.
@@ -423,9 +426,14 @@ export function atomicReplaceFile(
  * Throws if the file cannot be read or written (the caller decides whether an
  * unwritable contaminated file is fatal or falls back to alerting).
  * @param {string} absPath
+ * @param {(path: string) => import("node:fs").Stats} [lstat] injectable
+ *   pre-rename recheck stat (fault-injection seam, mirrors
+ *   {@link atomicReplaceFile}'s `tmpName`): lets a test drive the concurrent
+ *   write/symlink-swap that the TOCTOU guard exists to catch, which is otherwise
+ *   unreachable from this fully-synchronous path. Defaults to `lstatSync`.
  * @returns {boolean}
  */
-export function cleanFile(absPath) {
+export function cleanFile(absPath, lstat = lstatSync) {
   let fd;
   try {
     fd = openSync(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -473,7 +481,7 @@ export function cleanFile(absPath) {
     // Re-verify the on-path file against the open-time snapshot before writing:
     // an inode/size/mtime change (or a swap to a symlink) means someone modified
     // it under us, so fail loud rather than clobber their write (lost update).
-    const after = lstatSync(absPath);
+    const after = lstat(absPath);
     if (
       after.isSymbolicLink() ||
       after.ino !== before.ino ||
