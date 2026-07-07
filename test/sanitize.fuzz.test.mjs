@@ -39,9 +39,12 @@ const INVISIBLE_VALUES = [
 // Every raw ANSI control introducer Layer 1 must guarantee is gone from the
 // output. The no-silent-suppression invariant alone can't catch a passthrough
 // (an unchanged byte trivially satisfies it), so this is the postcondition that
-// turns "output is clean" into a checked property rather than a hope.
+// turns "output is clean" into a checked property rather than a hope. Covers the
+// 7-bit ESC (U+001B), the 8-bit C1 CSI (U+009B), AND the C1 OSC introducer
+// (U+009D) — the generator seeds cp(0x9d), so omitting it let an OSC-introducer
+// passthrough slip by unchecked.
 // eslint-disable-next-line no-control-regex -- asserting the raw introducers are absent is the point
-const RAW_INTRODUCER_RE = /[\u001b\u009b]/;
+const RAW_INTRODUCER_RE = /[\u001b\u009b\u009d]/;
 const STRUCTURAL_TOKENS = [
   '<div style="display:none">',
   "</div>",

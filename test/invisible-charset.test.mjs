@@ -18,6 +18,15 @@ import {
   OUTPUT_PATH,
 } from "../scripts/gen-invisible-charset.mjs";
 import { VS, BLANK_NON_CF } from "../src/invisible.mjs";
+import {
+  parseStandardizedVariants,
+  loadStandardizedVariantsUcd,
+} from "../scripts/gen-standardized-variants.mjs";
+import {
+  STANDARDIZED_VARIANTS,
+  isStandardizedVariant,
+  UNICODE_VERSION as SV_UNICODE_VERSION,
+} from "../src/standardized-variants.mjs";
 
 describe("invisible-charset SSOT", () => {
   it("committed JSON equals the freshly generated code points", () => {
@@ -38,5 +47,61 @@ describe("invisible-charset SSOT", () => {
     for (const s of [VS, BLANK_NON_CF])
       for (const ch of s) expected.add(ch.codePointAt(0));
     assert.equal(generated.size, expected.size);
+  });
+});
+
+// SSOT round-trip for the standardized variation sequence table backing the
+// FE00–FE0D carve-out in invisible.mjs. src/standardized-variants.mjs is
+// generated from the vendored UCD slice; re-parsing that slice here and
+// asserting the committed module matches makes editing the data without
+// regenerating (or a mutant flipping a pair) a hard CI failure.
+describe("standardized-variants SSOT", () => {
+  const { text, version } = loadStandardizedVariantsUcd();
+  const pairs = parseStandardizedVariants(text);
+
+  it("pins the committed module's Unicode version to the vendored slice", () => {
+    assert.equal(SV_UNICODE_VERSION, version);
+  });
+
+  it("committed table equals the freshly parsed UCD slice", () => {
+    assert.deepEqual(STANDARDIZED_VARIANTS, pairs);
+  });
+
+  it("is a non-trivial table with only FE00–FE0D selectors", () => {
+    assert.ok(pairs.length > 100, "expected a few hundred registered pairs");
+    for (const [, selector] of pairs) {
+      assert.ok(selector >= 0xfe00 && selector <= 0xfe0d);
+    }
+  });
+
+  it("isStandardizedVariant accepts every registered pair", () => {
+    for (const [base, selector] of pairs)
+      assert.ok(
+        isStandardizedVariant(base, selector),
+        `U+${base.toString(16)} + U+${selector.toString(16)} not recognized`,
+      );
+  });
+
+  // Hand-checked anchors from StandardizedVariants.txt so the contract stays
+  // legible even if the derivation above were somehow tautological.
+  for (const [base, selector, note] of [
+    [0x30, 0xfe00, "DIGIT ZERO short diagonal stroke form"],
+    [0x2205, 0xfe00, "EMPTY SET with long stroke overlay"],
+    [0x4e0d, 0xfe00, "U+4E0D → CJK COMPATIBILITY IDEOGRAPH-F967"],
+  ]) {
+    it(`recognizes the registered sequence U+${base.toString(16)}+VS (${note})`, () =>
+      assert.ok(isStandardizedVariant(base, selector)));
+  }
+
+  it("rejects an unregistered base or a non-standardized selector", () => {
+    assert.ok(!isStandardizedVariant(0x61, 0xfe00), "'a' + VS1 not registered");
+    assert.ok(
+      !isStandardizedVariant(0x30, 0xfe0d),
+      "DIGIT ZERO is registered with VS1, not VS14",
+    );
+    assert.ok(
+      !isStandardizedVariant(0x30, 0xfe0f),
+      "VS16 is an emoji presentation selector, never a standardized variant",
+    );
   });
 });

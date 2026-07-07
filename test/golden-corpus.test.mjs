@@ -49,4 +49,46 @@ describe("cross-language golden corpus", () => {
       assert.ok(c.html && Array.isArray(c.html.cleaned), `${c.name} html`);
     }
   });
+
+  // Precision negatives: legitimate glyphs that the Layer-1 carve-out must pass
+  // through UNTOUCHED, plus a positive control proving a malformed tag run is
+  // still stripped. Asserted directly against the recorded golden (not just its
+  // freshness) so a regression that starts mangling flags / variation sequences —
+  // or stops stripping a partial tag run — fails here, in lockstep across the JS
+  // and Python clients that both read this recording.
+  const corpus = JSON.parse(
+    readFileSync(join(repoRoot, "tests", "golden-corpus.json"), "utf8"),
+  );
+  const golden = JSON.parse(
+    readFileSync(join(repoRoot, "tests", "golden.json"), "utf8"),
+  );
+  const inputUnits = (name) => corpus.cases.find((c) => c.name === name).units;
+  const recorded = (name) => golden.cases.find((c) => c.name === name);
+
+  for (const name of [
+    "flag_tag_scotland",
+    "standardized_variation_empty_set",
+    "ideographic_variation_ge",
+  ]) {
+    it(`${name} survives verbatim with no findings (both modes)`, () => {
+      const rec = recorded(name);
+      assert.ok(rec, `${name} missing from golden`);
+      const input = inputUnits(name);
+      for (const mode of ["plain", "html"]) {
+        assert.deepEqual(rec[mode].cleaned, input, `${name} ${mode} cleaned`);
+        assert.deepEqual(rec[mode].found, [], `${name} ${mode} found`);
+      }
+    });
+  }
+
+  it("malformed_tag_run is still stripped to the bare flag base (positive control)", () => {
+    const rec = recorded("malformed_tag_run");
+    const input = inputUnits("malformed_tag_run");
+    // Bare WAVING BLACK FLAG U+1F3F4 = surrogate pair [0xD83C, 0xDFF4].
+    for (const mode of ["plain", "html"]) {
+      assert.deepEqual(rec[mode].cleaned, [0xd83c, 0xdff4], `${mode} cleaned`);
+      assert.notDeepEqual(rec[mode].cleaned, input, `${mode} actually changed`);
+      assert.ok(rec[mode].found.includes("cf-format"), `${mode} reports cf`);
+    }
+  });
 });

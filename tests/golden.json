@@ -327,6 +327,56 @@
         "found": ["lone-surrogates"],
         "warnings": ["Normalized lone UTF-16 surrogates"]
       }
+    },
+    {
+      "name": "flag_tag_scotland",
+      "plain": {
+        "cleaned": [
+          55356, 57332, 56128, 56423, 56128, 56418, 56128, 56435, 56128, 56419,
+          56128, 56436, 56128, 56447
+        ],
+        "found": [],
+        "warnings": []
+      },
+      "html": {
+        "cleaned": [
+          55356, 57332, 56128, 56423, 56128, 56418, 56128, 56435, 56128, 56419,
+          56128, 56436, 56128, 56447
+        ],
+        "found": [],
+        "warnings": []
+      }
+    },
+    {
+      "name": "standardized_variation_empty_set",
+      "plain": { "cleaned": [8709, 65024], "found": [], "warnings": [] },
+      "html": { "cleaned": [8709, 65024], "found": [], "warnings": [] }
+    },
+    {
+      "name": "ideographic_variation_ge",
+      "plain": {
+        "cleaned": [33883, 56128, 56576],
+        "found": [],
+        "warnings": []
+      },
+      "html": { "cleaned": [33883, 56128, 56576], "found": [], "warnings": [] }
+    },
+    {
+      "name": "malformed_tag_run",
+      "plain": {
+        "cleaned": [55356, 57332],
+        "found": ["cf-format"],
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
+      },
+      "html": {
+        "cleaned": [55356, 57332],
+        "found": ["cf-format"],
+        "warnings": [
+          "Stripped: Format chars (Cf) — inspect the removed bytes with a hex dump (xxd / od -c), which survives sanitization"
+        ]
+      }
     }
   ]
 }
