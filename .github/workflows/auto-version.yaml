@@ -39,7 +39,7 @@ jobs:
         # Credentials stay persisted: version-bump.sh pushes the release-docs
         # commit and the vX.Y.Z tag with them. A PAT lets the tag push clear any
         # tag protection; falls back to GITHUB_TOKEN.
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6.0.2 # zizmor: ignore[artipacked]
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
         with:
           # Need full history so `git describe`/`git log` can find the last tag.
           fetch-depth: 0
