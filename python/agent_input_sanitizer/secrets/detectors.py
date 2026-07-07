@@ -40,7 +40,10 @@ from detect_secrets.plugins import jwt as _jwt
 from detect_secrets.plugins.base import RegexBasedDetector
 
 # Compiled denylists keyed by detector class name, loaded from the shared SSOT
-# packaged alongside this module.
+# packaged alongside this module. Patterns are constrained to a JS-portable regex
+# subset (see the file's `description`); that constraint is enforced by
+# test/secret-detectors-portability.test.mjs, which compiles every pattern with
+# the real JS `RegExp` — not re-approximated here in Python.
 DETECTORS_FILE = Path(__file__).resolve().parent / "data" / "secret-detectors.json"
 _DENYLISTS = {
     entry["const"]: [re.compile(pattern) for pattern in entry["patterns"]]
