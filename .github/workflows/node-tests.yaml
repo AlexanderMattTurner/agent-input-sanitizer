@@ -40,6 +40,12 @@ jobs:
 
       - name: Run tests
         if: steps.check.outputs.configured == 'true'
+        # Pin fast-check to the fixed seed (see test/test-helpers.mjs) so this
+        # gating check is deterministic: a green run stays green and any failure
+        # is reproducible from the logged seed, never a transient fluke. The
+        # unseeded exploratory fuzzing lives in fuzz-nightly.yaml.
+        env:
+          FC_REPRODUCIBLE: "1"
         run: pnpm test
 
   # Stable Required check: runs even when `test` is cancelled/skipped, so a
