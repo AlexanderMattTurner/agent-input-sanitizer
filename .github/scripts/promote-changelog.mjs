@@ -133,5 +133,7 @@ try {
   // Exit 0 deliberately: pnpm publish has already succeeded at this point in
   // the release flow; a CHANGELOG hiccup must not abort the surrounding bash
   // script and skip the tag push.
-  warn(`failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  warn(
+    `failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+  );
 }
