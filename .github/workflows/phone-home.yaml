@@ -45,7 +45,7 @@ jobs:
           # Verify before extracting so a tampered release asset can't inject a
           # malicious binary next to the TEMPLATE_SYNC_TOKEN step. MUST match
           # GITLEAKS_VERSION and stay in lockstep with gitleaks.yaml's pin.
-          GITLEAKS_SHA256: "PLACEHOLDER_REPLACE_WITH_REAL_SHA256_FOR_GITLEAKS_8_30_1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           # Download to a file (not a pipe) so the digest is verified before extract.

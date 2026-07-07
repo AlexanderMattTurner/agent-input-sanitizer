@@ -23,7 +23,7 @@ jobs:
       # digest before extracting so a tampered release asset can't inject a
       # malicious binary. MUST be updated in lockstep with GITLEAKS_VERSION
       # (phone-home.yaml pins the same pair).
-      GITLEAKS_SHA256: "PLACEHOLDER_REPLACE_WITH_REAL_SHA256_FOR_GITLEAKS_8_30_1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
