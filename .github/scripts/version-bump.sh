@@ -20,6 +20,15 @@ source "$SCRIPT_DIR/lib/retry.bash"
 
 log() { echo "$@" >&2; }
 
+# Publish a step output for the workflow (no-op outside GitHub Actions). The
+# auto-version workflow reads `released`/`version` to decide whether — and at
+# what version — to also build and publish the coupled Python wheel to PyPI.
+emit_output() {
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf '%s\n' "$1" >>"$GITHUB_OUTPUT"
+  fi
+}
+
 # Self-publish guard. `private: true` marks a package that must never reach the
 # registry (npm itself refuses to publish it); for this flow it also means "this
 # repo is not a versioned npm app", so skip the whole release. This is the sole
@@ -70,9 +79,28 @@ determine_bump() {
   fi
 }
 
-# Get the latest published version from npm (source of truth)
+# Echo the larger of two dotted "X.Y.Z" versions per `sort -V`. An empty input
+# sorts as the smallest possible version, so max_version("","1.2.3") == "1.2.3".
+max_version() {
+  printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1
+}
+
+# Get the latest published version from npm (source of truth). Distinguish a
+# genuinely-unpublished package (npm error `E404` -> treat as 0.0.0, a first
+# release) from a transient registry/network failure. A blanket
+# `|| echo "0.0.0"` would silently rebase the version to 0.0.1 on any outage and
+# repoint the `latest` dist-tag downward, so anything other than E404 fails loud.
 PACKAGE_NAME=$(node -p "require('./package.json').name")
-CURRENT_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
+NPM_VIEW_RC=0
+NPM_VIEW_OUTPUT=$(npm view "$PACKAGE_NAME" version 2>&1) || NPM_VIEW_RC=$?
+if [[ "$NPM_VIEW_RC" -eq 0 ]]; then
+  CURRENT_VERSION="$NPM_VIEW_OUTPUT"
+elif grep -q "E404" <<<"$NPM_VIEW_OUTPUT"; then
+  CURRENT_VERSION="0.0.0"
+else
+  log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $NPM_VIEW_OUTPUT"
+  exit 1
+fi
 # `npm view` can print nothing on a success exit (never-published package) or
 # emit a prerelease like `1.2.3-beta.0`; take the first line and require strict
 # X.Y.Z so the arithmetic bump below can't silently misfire. Empty -> 0.0.0
@@ -87,6 +115,18 @@ log "Current npm version: $CURRENT_VERSION"
 
 # Find the latest version tag to determine which commits to analyze
 LAST_TAG=$(git describe --tags --match "v*" --abbrev=0 HEAD 2>/dev/null || echo "")
+
+# The version base must exceed every existing release marker, not just npm. npm
+# and git tags are both declared sources of truth, and a flow migration or a
+# publish that failed after tagging can leave them disagreeing (e.g. a tag
+# pushed without a matching npm publish). Bump from the max of npm and LAST_TAG
+# so the computed version never goes backward and never collides with the tag of
+# HEAD's lineage. Using LAST_TAG (the same reachable tag the commit range is cut
+# from) keeps the version base aligned with the commits being analyzed.
+BASE_VERSION=$(max_version "$CURRENT_VERSION" "${LAST_TAG#v}")
+if [[ "$BASE_VERSION" != "$CURRENT_VERSION" ]]; then
+  log "Latest tag ($LAST_TAG) is ahead of npm ($CURRENT_VERSION); bumping from $BASE_VERSION."
+fi
 
 if [[ -n "$LAST_TAG" ]]; then
   # Skip if HEAD is already tagged (no new commits since last release)
@@ -226,8 +266,8 @@ Use the changelog_draft tool to report the result."
   fi
 fi
 
-# Parse version components
-IFS='.' read -r MAJOR MINOR PATCH_NUM <<<"$CURRENT_VERSION"
+# Parse version components from the base (max of npm and the highest tag)
+IFS='.' read -r MAJOR MINOR PATCH_NUM <<<"$BASE_VERSION"
 
 # Calculate new version
 case $BUMP in
@@ -265,18 +305,37 @@ fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
 '
 log "Set package.json to $NEW_VERSION (working directory only)"
 
-# Build and publish to npm. Treat "already published" (the registry's caching
-# can let the earlier safety check miss an existing version) as success.
-if ! PUBLISH_OUTPUT=$(pnpm publish --provenance --access public --no-git-checks 2>&1); then
-  if echo "$PUBLISH_OUTPUT" | grep -q "Cannot publish over previously published version"; then
-    log "Version $NEW_VERSION already published (detected at publish time). Skipping."
+# Build and publish to npm.
+# A publish conflict (the version already exists — possible when registry
+# caching let the earlier `npm view` safety check miss it) is benign and must
+# be treated as success. Detect it by npm's structured error CODE (`E409` /
+# `EPUBLISHCONFLICT`), not free-text stderr that can drift across npm versions
+# and locales — and confirm the already-published version is exactly the one we
+# tried to publish before swallowing the failure; any other conflict is a real
+# error.
+# `|| PUBLISH_RC=$?` keeps the failing publish from tripping `set -e`; without it
+# the assignment's non-zero status would abort before we can inspect the code.
+PUBLISH_RC=0
+PUBLISH_OUTPUT=$(pnpm publish --provenance --access public --no-git-checks 2>&1) || PUBLISH_RC=$?
+if [[ "$PUBLISH_RC" -ne 0 ]]; then
+  if grep -qE 'E(409|PUBLISHCONFLICT)' <<<"$PUBLISH_OUTPUT" &&
+    npm view "$PACKAGE_NAME@$NEW_VERSION" version &>/dev/null; then
+    log "Version $NEW_VERSION already published (publish conflict on the same version). Skipping."
     exit 0
   fi
   log "$PUBLISH_OUTPUT"
-  exit 1
+  exit "$PUBLISH_RC"
 fi
 log "$PUBLISH_OUTPUT"
 log "✅ Published $PACKAGE_NAME@$NEW_VERSION"
+
+# Signal the workflow to build and publish the coupled Python wheel at this same
+# version. Emitted only after a genuine npm publish (not on the "already exists"
+# early-exits above), so PyPI is published exactly when npm is. If a later step
+# in this script fails, npm is already out and the workflow's manual break-glass
+# (publish-python.yaml) can push the matching wheel.
+emit_output "released=true"
+emit_output "version=$NEW_VERSION"
 
 # Promote "## Unreleased" to a dated version section in CHANGELOG.md, using the
 # drafted body. The helper exits 0 even on its own errors: the package is
@@ -322,7 +381,12 @@ fi
 
 # Tag the release for future commit-range detection. Tag HEAD (which now
 # includes the release-docs commit, if any) so a re-trigger sees HEAD == tag SHA.
-git tag "v$NEW_VERSION"
+# Guard against an existing tag: BASE_VERSION already keeps NEW_VERSION ahead of
+# every tag, but a re-run of the same release must stay idempotent rather than
+# abort under `set -e` when the local tag already exists.
+if ! git rev-parse -q --verify "refs/tags/v$NEW_VERSION" >/dev/null; then
+  git tag "v$NEW_VERSION"
+fi
 # Fail loudly if the tag never lands: the tag is what stops the next run from
 # re-analyzing these commits (re-drafting the changelog, re-pushing release
 # docs), so a silent failure here would quietly corrupt the next release.

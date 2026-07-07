@@ -6,8 +6,13 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+// The executed release helper lives beside version-bump.sh in .github/scripts/;
+// scripts/version-bump.sh was deduplicated away, so test the single live copy.
 const SCRIPT = join(
   dirname(fileURLToPath(import.meta.url)),
+  "..",
+  ".github",
+  "scripts",
   "promote-changelog.mjs",
 );
 
