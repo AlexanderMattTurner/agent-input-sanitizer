@@ -7,6 +7,7 @@ env-bound values come from a :class:`RedactorConfig` instead of ``os.environ``.
 """
 
 import re
+import time
 
 import pytest
 
@@ -116,6 +117,22 @@ def test_field_value_regex_case_insensitive_and_multiline():
     )
     assert later is not None
     assert later.group("secret_value") == "abc123def456ghi789jkl012"
+
+
+@pytest.mark.parametrize("n", [16, 32, 48, 64])
+def test_field_value_re_linear_on_underscore_run(n):
+    # ReDoS adversarial input: a keyword, a long run of `_`, then a byte that is
+    # not an assignment operator so no match ever completes. The old
+    # `(?:[_-]\w+)*` had separator `[_-]` and body `\w` both matching `_`, so the
+    # run repartitioned exponentially (measured 7.9s at n=38, doubling every 2
+    # chars). The non-overlapping `(?:[_-][A-Za-z0-9]+)*` — disjoint separator
+    # and body classes — parses the run exactly one way, so search stays linear.
+    # Assert a wall-clock ceiling an exponential blowup at these sizes cannot
+    # meet, run against the REAL compiled pattern (not an approximation).
+    adversarial = "token" + "_" * n + "!"
+    start = time.perf_counter()
+    assert E.FIELD_VALUE_RE.search(adversarial) is None
+    assert time.perf_counter() - start < 1.0, n
 
 
 # ─── Bracket-wrapped values ──────────────────────────────────────────────────
@@ -572,6 +589,18 @@ def test_placeholder_values_not_redacted(label, text):
 )
 def test_is_metadata_field(label, line, value, expected):
     assert E._is_metadata_field(line, value) is expected, label
+
+
+def test_is_metadata_field_uses_explicit_offset():
+    # When the value also appears earlier in the line, the first-occurrence
+    # `line.find(value)` fingers the wrong prefix; the caller passes the value's
+    # real match offset so the actual assignment (a metadata field here) is seen.
+    value = "AnthropicAPIKeyValue"
+    line = f"note {value} then token_name = {value}"
+    # No offset -> first occurrence (after "note ") has no operator -> not metadata.
+    assert E._is_metadata_field(line, value) is False
+    # Real offset -> the SECOND occurrence, assigned to token_name -> metadata.
+    assert E._is_metadata_field(line, value, line.rindex(value)) is True
 
 
 @pytest.mark.parametrize(
