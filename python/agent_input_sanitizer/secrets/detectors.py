@@ -39,13 +39,44 @@ from pathlib import Path
 from detect_secrets.plugins import jwt as _jwt
 from detect_secrets.plugins.base import RegexBasedDetector
 
+# data/secret-detectors.json's own `description` requires every pattern to stay
+# portable to JavaScript RegExp (no named groups, backreferences, inline flags,
+# or \A/\Z) for a future JS consumer. Python's `re` happily compiles all four —
+# `_assert_js_portable` is what actually gates a Python-only pattern; without it
+# a violation would only surface once a JS consumer tried to load the same file.
+_JS_INCOMPATIBLE_CONSTRUCTS = {
+    "named group (?P<name>...)": re.compile(r"\(\?P<"),
+    "named backreference (?P=name)": re.compile(r"\(\?P="),
+    "numbered backreference (\\1, \\2, ...)": re.compile(r"\\[1-9]"),
+    "inline flag (?i), (?m:...), etc.": re.compile(r"\(\?[aiLmsux]+[:)]"),
+    r"\A anchor": re.compile(r"\\A"),
+    r"\Z anchor": re.compile(r"\\Z"),
+}
+
+
+def _assert_js_portable(pattern: str) -> None:
+    for label, matcher in _JS_INCOMPATIBLE_CONSTRUCTS.items():
+        if matcher.search(pattern):
+            raise ValueError(
+                f"detector pattern {pattern!r} in data/secret-detectors.json uses "
+                f"a JS-incompatible construct ({label}); patterns must stay "
+                "portable to JavaScript RegExp"
+            )
+
+
+def _load_denylists(detectors_file: Path) -> dict[str, list[re.Pattern]]:
+    denylists = {}
+    for entry in json.loads(detectors_file.read_text())["detectors"]:
+        for pattern in entry["patterns"]:
+            _assert_js_portable(pattern)
+        denylists[entry["const"]] = [re.compile(p) for p in entry["patterns"]]
+    return denylists
+
+
 # Compiled denylists keyed by detector class name, loaded from the shared SSOT
 # packaged alongside this module.
 DETECTORS_FILE = Path(__file__).resolve().parent / "data" / "secret-detectors.json"
-_DENYLISTS = {
-    entry["const"]: [re.compile(pattern) for pattern in entry["patterns"]]
-    for entry in json.loads(DETECTORS_FILE.read_text())["detectors"]
-}
+_DENYLISTS = _load_denylists(DETECTORS_FILE)
 
 
 class AnthropicApiKeyDetector(RegexBasedDetector):
