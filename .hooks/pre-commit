@@ -26,4 +26,9 @@ if command -v pnpm >/dev/null 2>&1; then
   pnpm exec lint-staged --allow-empty
 elif command -v npm >/dev/null 2>&1; then
   npx lint-staged --allow-empty
+else
+  # Neither package manager is on PATH, but the lint-staged binary exists (the
+  # guard above already returned when it did not). Run it directly rather than
+  # skipping staged-file formatting silently.
+  "$git_root/node_modules/.bin/lint-staged" --allow-empty
 fi

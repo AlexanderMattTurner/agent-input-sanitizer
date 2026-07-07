@@ -22,6 +22,12 @@ if ! command -v pre-commit >/dev/null 2>&1; then
   exit 0
 fi
 
+# Snapshot the worktree BEFORE running fixers. If it was already dirty, we
+# cannot tell fixer output apart from the user's in-progress edits, so we must
+# not fold anything into an auto `style:` commit (that would sweep unrelated WIP
+# — and possibly secrets — into history under a misleading message).
+pre_state=$(git status --porcelain)
+
 if pre-commit run --all-files; then
   exit 0
 fi
@@ -31,6 +37,13 @@ if git diff --quiet; then
   exit 1
 fi
 
+if [[ -n "$pre_state" ]]; then
+  echo "pre-push: pre-commit auto-fixed files, but the worktree was already dirty before this run." >&2
+  echo "pre-push: refusing to fold pre-existing changes into a 'style:' commit — review, stage, and commit them yourself, then re-run 'git push'." >&2
+  exit 1
+fi
+
+# Worktree was clean pre-run, so every change now present is fixer output.
 git diff --name-only -z | xargs -0 git add --
 git commit --no-verify -m "style: auto-fix pre-commit issues"
 echo "pre-push: auto-fixed and committed pre-commit issues — re-run 'git push'." >&2
