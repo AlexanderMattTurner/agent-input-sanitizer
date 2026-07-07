@@ -10,9 +10,10 @@ base install require detect-secrets.
 
 import subprocess
 import sys
-from pathlib import Path
 
-_PKG = Path(__file__).resolve().parents[2] / "python"
+from tests._helpers import REPO_ROOT
+
+_PKG = REPO_ROOT / "python"
 
 
 def test_base_import_does_not_pull_detect_secrets():

@@ -9,7 +9,8 @@ import os
 import subprocess
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from tests._helpers import REPO_ROOT
+
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "check-token-scope.sh"
 
 
