@@ -12,7 +12,10 @@ useDefault = true
 
 [allowlist]
 description = "Secret-redaction engine sample fixtures (not real secrets)"
+# Anchored with ^ so only these exact top-level paths are allowlisted. gitleaks
+# matches path regexes unanchored, so `x/tests/secrets/foo` (or any nested
+# directory an attacker adds) would otherwise bypass the Required scan.
 paths = [
-  '''tests/secrets/.*''',
-  '''python/agent_input_sanitizer/secrets/data/secret-detectors\.json''',
+  '''^tests/secrets/.*''',
+  '''^python/agent_input_sanitizer/secrets/data/secret-detectors\.json$''',
 ]

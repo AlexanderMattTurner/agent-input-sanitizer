@@ -34,6 +34,12 @@ jobs:
           - '.pre-commit-config.yaml'
           - '.github/scripts/run-hook-lifecycle.sh'
           - '.github/workflows/hook-lifecycle.yaml'
+          # This job's setup runs through the composite action and the reusable
+          # decide workflow; a change to either can break the lifecycle, so the
+          # gate must open when they change (otherwise it fails open — skipping
+          # the job exactly when the dependency it relies on changed).
+          - '.github/actions/setup-base-env/action.yaml'
+          - '.github/workflows/decide-reusable.yaml'
 
   hook-lifecycle:
     needs: decide

@@ -20,24 +20,28 @@ set -uo pipefail
 GITHUB_ENV="${GITHUB_ENV:-/dev/null}"
 REPORT_PATH="${REPORT_PATH:-/tmp/security-report.md}"
 
-# Append a section heading + `gh api` result to the report. Passes $REPO into
-# jq via `--arg repo` (not string interpolation) to keep jq parsing safe even
-# if the repo name later contains special characters.
+# Append a section heading + `gh api` result to the report. `gh api` has no
+# `--arg` flag (passing one aborts the call, so the report would only ever hold
+# the fallback), so pipe its JSON through the real `jq`, which does support it:
+# $REPO is passed as data via `--arg repo`, keeping parsing safe even if the repo
+# name contains jq metacharacters. `set -o pipefail` makes a failure in either
+# `gh` or `jq` trip the fallback.
 gh_api_section() {
   local heading="$1" endpoint="$2" jq_expr="$3" fallback="$4"
   {
     echo ""
     echo "$heading"
   } >>"$REPORT_PATH"
-  gh api "$endpoint" --arg repo "$REPO" --jq "$jq_expr" \
-    >>"$REPORT_PATH" 2>&1 || echo "$fallback" >>"$REPORT_PATH"
+  gh api "$endpoint" 2>>"$REPORT_PATH" |
+    jq -r --arg repo "$REPO" "$jq_expr" >>"$REPORT_PATH" ||
+    echo "$fallback" >>"$REPORT_PATH"
 }
 
 echo "## Dependabot Alerts" >"$REPORT_PATH"
-gh api "repos/${REPO}/dependabot/alerts?state=open&per_page=100" \
-  --arg repo "$REPO" \
-  --jq '.[] | "- **\(.security_advisory.severity | ascii_upcase)**: [\(.security_advisory.summary)](https://github.com/\($repo)/security/dependabot/\(.number)) in `\(.dependency.package.name)` (\(.dependency.package.ecosystem))"' \
-  >>"$REPORT_PATH" 2>&1 || echo "_Could not fetch Dependabot alerts (check repo permissions)._" >>"$REPORT_PATH"
+gh api "repos/${REPO}/dependabot/alerts?state=open&per_page=100" 2>>"$REPORT_PATH" |
+  jq -r --arg repo "$REPO" '.[] | "- **\(.security_advisory.severity | ascii_upcase)**: [\(.security_advisory.summary)](https://github.com/\($repo)/security/dependabot/\(.number)) in `\(.dependency.package.name)` (\(.dependency.package.ecosystem))"' \
+    >>"$REPORT_PATH" ||
+  echo "_Could not fetch Dependabot alerts (check repo permissions)._" >>"$REPORT_PATH"
 
 gh_api_section \
   "## Code Scanning Alerts" \
