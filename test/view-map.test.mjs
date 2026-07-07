@@ -14,6 +14,7 @@ import {
   resolveSpan,
   rehydrateNewString,
   pairsToUtf16,
+  pairDiskSpans,
 } from "../src/view-map.mjs";
 
 // Secrets assembled at runtime so no complete token literal trips push
@@ -393,5 +394,36 @@ describe("pairsToUtf16", () => {
       PH_KEY,
     );
     assert.equal(text.slice(out[1].start, out[1].start + PH.length), PH);
+  });
+});
+
+describe("pairDiskSpans", () => {
+  it("maps a redaction pair to its [start,end) disk span", () => {
+    // Happy path: one placeholder, no deletions, so the disk span is the
+    // pair's own [start, start+original.length).
+    const spans = pairDiskSpans(
+      { pairs: [{ placeholder: "[REDACTED]", original: "secret", start: 0 }] },
+      [],
+    );
+    assert.deepEqual(spans, [{ start: 0, end: "secret".length }]);
+  });
+
+  it("throws when a pair start maps inside another placeholder", () => {
+    // Defensive guard: placeholders never overlap in real views, but pass an
+    // overlapping pair set directly to prove the guard throws rather than
+    // silently emitting a garbage span (which would misplace a secret's disk
+    // footprint). The second pair's start (3) is strictly interior to the
+    // first placeholder "[REDACTED]" (offsets [0,10)), so mapViewOffset returns
+    // null.
+    const view = {
+      pairs: [
+        { placeholder: "[REDACTED]", original: "secret", start: 0 },
+        { placeholder: "[X]", original: "y", start: 3 },
+      ],
+    };
+    assert.throws(
+      () => pairDiskSpans(view, []),
+      /maps inside another placeholder/,
+    );
   });
 });
