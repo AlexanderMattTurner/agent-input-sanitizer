@@ -64,21 +64,34 @@ def test_serve_one_engine_failure_writes_error(monkeypatch):
         a.close()
 
 
-def test_serve_one_engine_failure_logs_traceback_to_stderr(monkeypatch, capsys):
+def test_serve_one_engine_failure_logs_type_and_frames_not_input_or_message(
+    monkeypatch, capsys
+):
+    # A detection failure logs the exception TYPE and its stack FRAMES for the
+    # operator, but NEVER the exception message or the request text: either can
+    # embed bytes of the secret-bearing input line, which must not reach the logs.
+    secret_input = "AKIAIOSFODNN7EXAMPLE"
+    secret_message = "leaky-exception-message-9f3a2b"
+
     def _boom(*a, **k):
-        raise RuntimeError("detection blew up")
+        raise RuntimeError(secret_message)
 
     monkeypatch.setattr(S, "handle_request", _boom)
     a, b = socket.socketpair()
     try:
-        body = json.dumps({"text": "key: AKIAIOSFODNN7EXAMPLE"}).encode("utf-8")
+        body = json.dumps({"text": f"key: {secret_input}"}).encode("utf-8")
         a.sendall(struct.pack(">I", len(body)) + body)
         S._serve_one(b)
         _drain(a)  # the client-facing response is asserted separately above
     finally:
         a.close()
     err = capsys.readouterr().err
-    assert "RuntimeError" in err and "detection blew up" in err
+    # Positive markers proving the log path ran and is useful to the operator.
+    assert "RuntimeError" in err  # exception type is logged
+    assert "_serve_one" in err  # a stack frame is logged
+    # The two leak vectors are absent.
+    assert secret_message not in err  # exception message withheld
+    assert secret_input not in err  # request text withheld
 
 
 def test_serve_one_malformed_json_body_closes():
