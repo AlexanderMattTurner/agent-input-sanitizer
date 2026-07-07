@@ -117,13 +117,21 @@ def _serve_one(conn: socket.socket) -> None:
                 _request_config(req),
                 redact_configured,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # A genuine detection failure for THIS request: signal the client so it
-            # fails THAT call closed, but keep the daemon alive. Log the traceback
-            # server-side (never to the client) so a systematic fault — every
-            # request failing, not just one malformed one — is visible to
-            # whoever operates the daemon instead of silently discarded.
-            traceback.print_exc(file=sys.stderr)
+            # fails THAT call closed, but keep the daemon alive. Log the exception
+            # TYPE and its stack FRAMES (never to the client) so a systematic
+            # fault — every request failing, not just one malformed one — is
+            # visible to whoever operates the daemon. The exception MESSAGE is
+            # deliberately withheld: it can embed bytes of the secret-bearing
+            # input line (e.g. a re/JSON error echoing the offending text), which
+            # must never reach the logs. Frames are static source locations, not
+            # runtime data, so they are safe.
+            sys.stderr.write(
+                f"secret redaction failed ({type(exc).__name__}); "
+                "input and exception message withheld from log:\n"
+                + "".join(traceback.format_tb(exc.__traceback__))
+            )
             _write_frame(conn, {"error": "redaction failed"})
             return
         _write_frame(conn, result)
@@ -188,9 +196,28 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
     # `makedirs(..., mode=...)` only applies `mode` to a directory it actually
     # CREATES — `exist_ok=True` silently accepts a pre-existing dir at ANY
     # permission level, including world-writable (e.g. a shared /tmp subpath
-    # another local process claimed first). Enforce the mode unconditionally
-    # so a stale/attacker-seeded directory can't leave the socket reachable.
-    os.chmod(socket_dir, 0o700)
+    # another local process claimed first). Enforce the mode so a
+    # stale/attacker-seeded directory can't leave the socket reachable.
+    #
+    # A plain `os.chmod(socket_dir, ...)` re-resolves the PATH: between the
+    # makedirs above and the chmod, another local process could swap the final
+    # component for a symlink and redirect the chmod onto a directory it owns
+    # (TOCTOU). Bind an fd to the real directory instead — O_NOFOLLOW refuses a
+    # symlinked final component — and fchmod/fstat through that fd so the check
+    # and the change target the same inode. Refuse a directory this uid does not
+    # own: tightening someone else's dir to 0o700 neither makes it ours nor
+    # makes the socket safe, so fail loudly rather than serve on it.
+    dir_fd = os.open(socket_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        owner = os.fstat(dir_fd).st_uid
+        if owner != os.getuid():
+            raise PermissionError(
+                f"refusing to serve: socket directory {socket_dir!r} is owned by "
+                f"uid {owner}, not {os.getuid()}"
+            )
+        os.fchmod(dir_fd, 0o700)
+    finally:
+        os.close(dir_fd)
     with configure_plugins():
         redact_configured(
             "warm up the detect-secrets mapping cache", None, RedactorConfig()

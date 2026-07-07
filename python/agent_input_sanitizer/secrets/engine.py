@@ -223,7 +223,6 @@ FIELD_VALUE_RE = re.compile(
     # source-code false positives without shortening a real secret. Other specials
     # (!@#) stay allowed so a symbol inside a secret doesn't truncate the capture
     # below the length threshold, and the anchor avoids swallowing trailing prose.
-    # No nested quantifier -> no catastrophic backtracking.
     #
     # The optional open/close bracket groups peel a wrapper that *encloses* the
     # value (`password = (<secret>)`, `key: {<secret>}`, `token: ["<secret>"]`):
@@ -239,14 +238,20 @@ FIELD_VALUE_RE = re.compile(
     # to start at the second operator byte (`= "v"` / `> "v"`), which is <20
     # contiguous chars, so the arm failed and the secret leaked.
     #
-    # `(?:[_-]\w+)*` after the keyword lets it be a PREFIX of a longer
+    # `(?:[_-][A-Za-z0-9]+)*` after the keyword lets it be a PREFIX of a longer
     # underscore/hyphen-segmented identifier (`api_key_prod`, `secret_value`,
     # the env-suffixed `AWS_SECRET_ACCESS_KEY_OLD`) — without it the keyword had
     # to abut the operator and these extremely common names leaked verbatim. The
     # `[_-]` separator is REQUIRED (not a bare `\w*`), so a plain word that merely
     # starts with a keyword (`secretary` = `secret`+`ary`, `tokenizer`) is not
-    # mistaken for a credential field.
-    rf"(?P<field_prefix>(?:{_FIELD_NAMES})(?:[_-]\w+)*[\"']?\s*(?::=|==|=>|[:=])\s*"
+    # mistaken for a credential field. The segment body is `[A-Za-z0-9]+`, NOT
+    # `\w+`: `\w` includes `_`, which is also the separator, so `(?:[_-]\w+)*`
+    # let a run of `_` be repartitioned exponentially many ways — measured
+    # catastrophic backtracking (`token` + `"_"*n` + `!` doubled per 2 chars).
+    # Disjoint separator/body classes make each `[_-]`-delimited segment parse
+    # exactly one way, so the match is linear in the input length (see
+    # tests/secrets/test_secrets_engine.py::test_field_value_re_linear_on_underscore_run).
+    rf"(?P<field_prefix>(?:{_FIELD_NAMES})(?:[_-][A-Za-z0-9]+)*[\"']?\s*(?::=|==|=>|[:=])\s*"
     r"(?:(?:Bearer|Token|Basic)\s+)?)"
     r"(?P<openbracket>[(\[{]?)"
     r"(?P<quote>[\"']?)"
@@ -342,15 +347,20 @@ _METADATA_SUFFIXES = ("type", "name", "label", "keyword", "kind")
 _ASSIGN_OP_CHARS = "=:!>"
 
 
-def _is_metadata_field(line: str, value: str) -> bool:
+def _is_metadata_field(line: str, value: str, value_start: int | None = None) -> bool:
     """True when ``value`` is assigned to a metadata field, not a secret field.
 
     Walks the text before the value with plain string ops (no regex) so a long,
     no-match prefix of attacker-influenced output can't drive backtracking: peel
     a trailing quote/``@``, require a trailing assignment operator (``=`` ``:``
     ``=>`` ``:=`` ``==``), then read back the identifier and test its suffix.
+
+    ``value_start`` is the value's actual offset in ``line`` when the caller has
+    it (from the regex match), so the prefix is exact rather than the FIRST
+    ``line.find(value)`` occurrence — a value that also appears earlier in the
+    line (e.g. inside the field name) would otherwise mislocate the prefix.
     """
-    idx = line.find(value)
+    idx = line.find(value) if value_start is None else value_start
     if idx <= 0:
         return False
     prefix = line[:idx].rstrip()
@@ -727,7 +737,11 @@ def _redact_core(
         name_skip = not web_ingress and (
             _is_benign_cursor(m)
             or _is_filesystem_path(m)
-            or _is_metadata_field(m.group(0), m.group("secret_value"))
+            or _is_metadata_field(
+                m.group(0),
+                m.group("secret_value"),
+                m.start("secret_value") - m.start(),
+            )
         )
         value = m.group("secret_value")
         if (

@@ -52,6 +52,7 @@ options, rather than an opaque ``node: Cannot find module``.
 """
 
 import atexit
+import hashlib
 import json
 import os
 import signal
@@ -188,18 +189,24 @@ def _check(response: dict) -> dict:
 
 def _parse_cli_json(output: str) -> dict:
     """Parse one line of CLI stdout as JSON, wrapping a non-JSON line in a clear
-    error that names the offending output and that it came from the sanitizer CLI.
+    error that fingerprints the offending output and names the sanitizer CLI as
+    its source.
 
     Without this, a Node crash or a stray ``console.log`` in the CLI surfaces as
     a bare ``json.decoder.JSONDecodeError`` with no hint of where the bad bytes
-    came from.
+    came from. The raw output is NOT echoed: a crash mid-sanitize can leave
+    UNsanitized input on stdout, so the error carries only its length and a
+    short SHA-256 fingerprint — enough to correlate/deduplicate reports without
+    surfacing the bytes themselves.
     """
     try:
         return json.loads(output)
     except json.JSONDecodeError as cause:
+        digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
         raise RuntimeError(
             "sanitize CLI returned non-JSON output (expected one JSON object): "
-            f"{output.strip()!r}"
+            f"{len(output)} bytes, sha256:{digest} (output withheld; it may "
+            "contain unsanitized input)"
         ) from cause
 
 
