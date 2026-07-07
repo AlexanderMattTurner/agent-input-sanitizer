@@ -180,12 +180,135 @@ function isConcreteColor(canonical) {
   return canonical === "transparent" || /^#[0-9a-f]{6}$/.test(canonical);
 }
 
+/** @param {number} n @returns {string} clamped two-hex-digit byte */
+function hexByte(n) {
+  return Math.max(0, Math.min(255, Math.round(n)))
+    .toString(16)
+    .padStart(2, "0");
+}
+
+/**
+ * Parse one rgb() channel: an integer/number `0..255` (clamped, as a browser
+ * clamps out-of-range) or a percentage `0%..100%` scaled to `0..255`. Returns
+ * null (fail open) on any other shape — a `none`/`calc()`/negative channel we
+ * cannot resolve to a concrete byte.
+ * @param {string} token
+ * @returns {number | null}
+ */
+function rgbChannel(token) {
+  const pct = token.match(/^\+?(\d*\.?\d+)%$/);
+  if (pct) return (Math.min(100, parseFloat(pct[1])) / 100) * 255;
+  const num = token.match(/^\+?(\d*\.?\d+)$/);
+  if (num) return parseFloat(num[1]);
+  return null;
+}
+
+/**
+ * Parse an hsl() hue as degrees (a `<number>` or an `<angle>` in
+ * deg/grad/rad/turn), normalized to `[0,360)`. Returns null on anything else.
+ * @param {string} token
+ * @returns {number | null}
+ */
+function hueDegrees(token) {
+  const match = token.match(/^([+-]?\d*\.?\d+)(deg|grad|rad|turn)?$/);
+  if (!match) return null;
+  const value = parseFloat(match[1]);
+  const unit = match[2] || "deg";
+  const deg =
+    unit === "grad"
+      ? (value * 360) / 400
+      : unit === "rad"
+        ? (value * 180) / Math.PI
+        : unit === "turn"
+          ? value * 360
+          : value;
+  return ((deg % 360) + 360) % 360;
+}
+
+/**
+ * Parse an hsl() saturation/lightness: a percentage or (CSS Color 4) a bare
+ * number, both read as `0..100` (clamped high). Returns null on any other shape.
+ * @param {string} token
+ * @returns {number | null}
+ */
+function hslPercent(token) {
+  const match = token.match(/^\+?(\d*\.?\d+)%?$/);
+  return match ? Math.min(100, parseFloat(match[1])) : null;
+}
+
+/**
+ * Convert HSL (`h` in degrees, `s`/`l` in `0..100`) to lowercase `#rrggbb`.
+ * @param {number} h @param {number} s @param {number} l @returns {string}
+ */
+function hslToHex(h, s, l) {
+  const sat = s / 100;
+  const light = l / 100;
+  const c = (1 - Math.abs(2 * light - 1)) * sat;
+  const hp = h / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  const [r, g, b] =
+    hp < 1
+      ? [c, x, 0]
+      : hp < 2
+        ? [x, c, 0]
+        : hp < 3
+          ? [0, c, x]
+          : hp < 4
+            ? [0, x, c]
+            : hp < 5
+              ? [x, 0, c]
+              : [c, 0, x];
+  const m = light - c / 2;
+  return `#${hexByte((r + m) * 255)}${hexByte((g + m) * 255)}${hexByte((b + m) * 255)}`;
+}
+
+/**
+ * Resolve an `rgb()/rgba()/hsl()/hsla()` function to `#rrggbb`, or
+ * `"transparent"` when its alpha channel is a literal zero (fully transparent
+ * text is invisible), or null when any component is unresolvable (fail open).
+ * Accepts the legacy comma form and the CSS Color 4 space/`/`-alpha form
+ * (`rgb(255 255 255 / 0.5)`, `hsl(0 0% 100%)`) and percentage channels.
+ * @param {string} value  lowercased, trimmed
+ * @returns {string | null}
+ */
+function canonicalizeColorFunction(value) {
+  const outer = value.match(/^(rgba?|hsla?)\(([^()]*)\)$/);
+  if (!outer) return null;
+  const isRgb = outer[1].startsWith("rgb");
+  let inner = outer[2].trim();
+  // Split the CSS Color 4 `<color> / <alpha>` form; a literal-zero alpha is
+  // fully transparent regardless of the color channels.
+  const slash = inner.split("/");
+  if (slash.length > 2) return null;
+  let alpha = slash.length === 2 ? slash[1].trim() : null;
+  if (slash.length === 2) inner = slash[0].trim();
+  const parts = inner.split(/[\s,]+/).filter(Boolean);
+  // The legacy comma form carries alpha as a 4th channel.
+  if (alpha === null && parts.length === 4) {
+    alpha = parts[3];
+    parts.length = 3;
+  }
+  if (alpha !== null && /^\+?0*\.?0+$/.test(alpha)) return "transparent";
+  if (parts.length !== 3) return null;
+  if (isRgb) {
+    const channels = parts.map(rgbChannel);
+    if (channels.some((c) => c === null)) return null;
+    return `#${channels.map((c) => hexByte(/** @type {number} */ (c))).join("")}`;
+  }
+  const h = hueDegrees(parts[0]);
+  const s = hslPercent(parts[1]);
+  const l = hslPercent(parts[2]);
+  if (h === null || s === null || l === null) return null;
+  return hslToHex(h, s, l);
+}
+
 /**
  * Canonicalize a CSS color to lowercase `#rrggbb` so `white`, `#FFF`,
- * `#ffffff`, and `rgb(255, 255, 255)` all compare equal. Returns the trimmed
- * lowercased input unchanged when it is not a form we recognize; callers gate
- * the same-color compare on isConcreteColor so an unresolved token (`var()`,
- * `inherit`) never falsely reads as a same-color hide.
+ * `#ffffff`, `rgb(255, 255, 255)`, `rgb(255 255 255)`, `rgb(100% 100% 100%)`,
+ * and `hsl(0 0% 100%)` all compare equal. Returns the trimmed lowercased input
+ * unchanged when it is not a form we recognize; callers gate the same-color
+ * compare on isConcreteColor so an unresolved token (`var()`, `inherit`) never
+ * falsely reads as a same-color hide.
  * @param {string} raw
  * @returns {string}
  */
@@ -201,27 +324,85 @@ function canonicalizeColor(raw) {
   if (shortHex)
     return `#${shortHex[1]}${shortHex[1]}${shortHex[2]}${shortHex[2]}${shortHex[3]}${shortHex[3]}`;
   if (/^#[0-9a-f]{6}$/.test(value)) return value;
-  const rgb = value.match(
-    /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,[^)]*)?\)$/,
-  );
-  if (rgb) {
-    /** @param {string} n */
-    const hex = (n) => Number(n).toString(16).padStart(2, "0");
-    return `#${hex(rgb[1])}${hex(rgb[2])}${hex(rgb[3])}`;
-  }
-  return value;
+  return canonicalizeColorFunction(value) ?? value;
 }
 
 // The leading color token of a `background` shorthand (the first token that
-// canonicalizes to a real color), so `background:#fff url(x)` still compares.
+// canonicalizes to a real color), so `background:#fff` still compares. Returns
+// "" (fail open, no same-color hide) when the shorthand carries an IMAGE layer
+// — `url(...)`, a gradient, or `image-set(...)`: the painted image can make
+// same-colored text perfectly readable over it (and if it fails to load the
+// element's own background shows through), so the flat color token is not
+// provably the rendered backdrop.
 /** @param {string} shorthand @returns {string} */
 function backgroundColor(shorthand) {
+  if (/\burl\(|gradient\(|image-set\(/i.test(shorthand)) return "";
   for (const token of shorthand.split(/\s+/)) {
     const color = canonicalizeColor(token);
     if (color && (color.startsWith("#") || color === "transparent"))
       return color;
   }
   return "";
+}
+
+// One resolved `inset()` edge collapses the box only when it is a percentage of
+// at least 50%: opposing edges (top/bottom, left/right) then sum to >=100% and
+// leave zero area. A length (`inset(200px)`), `calc()`, or `0` cannot be proven
+// to collapse without the box size, so it fails open (not collapsing).
+/** @param {string} edge @returns {boolean} */
+function isCollapsingInsetEdge(edge) {
+  const pct = edge.match(/^\+?(\d*\.?\d+)%$/);
+  return (
+    Boolean(pct) && parseFloat(/** @type {RegExpMatchArray} */ (pct)[1]) >= 50
+  );
+}
+
+// Expand an `inset()`'s 1–4 edge values to `[top, right, bottom, left]` using
+// the CSS margin-style shorthand rules.
+/** @param {string[]} parts @returns {string[]} */
+function expandInsetEdges(parts) {
+  const [t, r = t, b = t, l = r] = parts;
+  return [t, r, b, l];
+}
+
+/**
+ * True when a `clip-path` clips the element to nothing: `circle(0)`, or an
+ * `inset()` whose FOUR resolved edges ALL collapse (each a percentage >=50%).
+ * A partial inset that leaves any edge open (`inset(50% 0 0 0)` — bottom half
+ * visible) is NOT hidden: inspecting only the first value would over-splice it.
+ * Decorative clips (`circle(50%)`, small insets, polygons) render content and
+ * are left alone.
+ * @param {string} clipPath  lowercased, trimmed
+ * @returns {boolean}
+ */
+function isClipPathHidden(clipPath) {
+  if (/\bcircle\(\s{0,8}0(?![.\d])/.test(clipPath)) return true;
+  const inset = clipPath.match(/\binset\(([^)]*)\)/);
+  if (!inset) return false;
+  // Drop any `round <border-radius>` suffix, then read the edge list.
+  const parts = inset[1]
+    .split(/\bround\b/)[0]
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0 || parts.length > 4) return false;
+  return expandInsetEdges(parts).every(isCollapsingInsetEdge);
+}
+
+// Gradient-clipped / text-filled headings are VISIBLE despite `color:transparent`:
+// `background-clip:text` (or its `-webkit-` alias) paints the background through
+// the glyph shapes, and `-webkit-text-fill-color` overrides `color` for the fill.
+// Either signal means the transparent `color` is not the rendered text color, so
+// the same-`transparent` hide must fail open.
+/** @param {(key: string) => string} val @returns {boolean} */
+function isTextPaintedVisible(val) {
+  if (
+    val("background-clip") === "text" ||
+    val("-webkit-background-clip") === "text"
+  )
+    return true;
+  const fill = canonicalizeColor(val("-webkit-text-fill-color"));
+  return isConcreteColor(fill) && fill !== "transparent";
 }
 
 /** @param {(key: string) => string} val */
@@ -370,17 +551,8 @@ export function isHiddenStyle(styleStr) {
   if (isOffscreenOffset(val("text-indent"))) return true;
 
   // Clipped to nothing: the modern equivalent of the legacy `clip: rect(0…)`.
-  // `inset(50%)`…`inset(100%)` (including fractional `inset(99.9%)`) collapse
-  // the box, as does `circle(0)`. Decorative clips (`circle(50%)`, small
-  // `inset`s, polygons) render visible content and are left alone.
   const clipPath = val("clip-path");
-  if (
-    clipPath &&
-    /\b(?:inset\(\s{0,8}(?:[5-9]\d(?:\.\d+)?|100)%|circle\(\s{0,8}0(?![.\d]))/.test(
-      clipPath,
-    )
-  )
-    return true;
+  if (clipPath && isClipPathHidden(clipPath)) return true;
   if (isHidingTransform(val("transform"))) return true;
   if (isHidingFilter(val("filter"))) return true;
 
@@ -388,7 +560,10 @@ export function isHiddenStyle(styleStr) {
   // text are invisible to a human but plain text to the model. Colors are
   // canonicalized so `white`/`#fff`/`rgb(255,255,255)` mixes still compare.
   const color = canonicalizeColor(val("color"));
-  if (color === "transparent") return true;
+  // `color:transparent` alone hides text — UNLESS the glyphs are painted by a
+  // background-clip:text gradient or a concrete -webkit-text-fill-color, the
+  // standard gradient-heading recipe, in which case the text is visible.
+  if (color === "transparent" && !isTextPaintedVisible(val)) return true;
   const background =
     canonicalizeColor(val("background-color")) ||
     backgroundColor(val("background"));
@@ -651,26 +826,25 @@ const mdParser = unified().use(remarkParse).use(remarkGfm);
 const BOGUS_COMMENT_OPEN_RE = /<[!?]/g;
 
 /**
- * If `value.slice(at)` begins with an HTML comment (proper or bogus), return
- * the comment's end offset *within `value`* (exclusive); else null. Validated
- * against the real HTML tokenizer rather than a hand-rolled bogus-comment state
- * machine, so we splice exactly what a browser would hide and never a `<Foo>`
- * element, a `<!doctype>`, or visible prose.
+ * Map of comment start-offset -> end-offset (exclusive) for EVERY comment the
+ * HTML tokenizer finds in `value`, from a SINGLE rehype parse. Validated against
+ * the real tokenizer (parse5) rather than a hand-rolled bogus-comment state
+ * machine, so a bogus comment (`<!bogus>`, `<?php?>`, `<![CDATA[…]]>`) is spliced
+ * to exactly the span a browser hides and a `<Foo>` element, a `<!doctype>`, or
+ * visible prose never is. Replaces a per-candidate parse: the whole value is
+ * tokenized once and every span read from that tree.
  * @param {string} value
- * @param {number} at offset of a candidate `<!`/`<?` within `value`
- * @returns {number | null}
+ * @returns {Map<number, number>}
  */
-function bogusCommentEnd(value, at) {
-  const tree = /** @type {any} */ (
-    unified().use(rehypeParse, { fragment: true }).parse(value.slice(at))
-  );
-  // The slice starts at the candidate `<!`/`<?`, and an inline html node value
-  // is a single construct, so the first parsed child IS that construct: a
-  // `comment` node iff it tokenized to a (bogus) comment. A `<Foo>` element, a
-  // `<!doctype>` (dropped, leaving following text), or nothing else qualifies.
-  const first = tree.children[0];
-  if (!first || first.type !== "comment") return null;
-  return at + first.position.end.offset;
+function commentSpans(value) {
+  const tree = unified().use(rehypeParse, { fragment: true }).parse(value);
+  /** @type {Map<number, number>} */
+  const spans = new Map();
+  visit(tree, "comment", (/** @type {any} */ node) => {
+    if (node.position)
+      spans.set(node.position.start.offset, node.position.end.offset);
+  });
+  return spans;
 }
 
 /**
@@ -689,6 +863,10 @@ function bogusCommentEnd(value, at) {
  */
 function collectCommentRanges(value, base, nodeEnd, ranges) {
   BOGUS_COMMENT_OPEN_RE.lastIndex = 0;
+  // Tokenized bogus-comment spans, parsed once on first need (many values carry
+  // a proper `<!--` handled below without ever touching the tree).
+  /** @type {Map<number, number> | null} */
+  let spans = null;
   for (let match; (match = BOGUS_COMMENT_OPEN_RE.exec(value));) {
     const open = match.index;
     if (value.startsWith("<!--", open)) {
@@ -712,10 +890,11 @@ function collectCommentRanges(value, base, nodeEnd, ranges) {
       BOGUS_COMMENT_OPEN_RE.lastIndex = close + 3;
       continue;
     }
-    const end = bogusCommentEnd(value, open);
+    if (!spans) spans = commentSpans(value);
+    const end = spans.get(open);
     // Not a comment (a `<Foo>` element, a `<!doctype>`, visible prose): leave
     // it untouched and resume scanning just past this `<`.
-    if (end === null) continue;
+    if (end === undefined) continue;
     ranges.push({ start: base + open, end: base + end, kind: "comment" });
     BOGUS_COMMENT_OPEN_RE.lastIndex = end;
   }
@@ -986,7 +1165,7 @@ const BENIGN_BLOB_PARAM_RE =
 // OPAQUE, separator-free token, so the value must additionally contain a
 // contiguous 20+ char `[A-Za-z0-9_]` run (no hyphen/space — that's what splits
 // the prose runs below the bar) AND a digit before it counts as one.
-const OPAQUE_TOKEN_RE = /[A-Za-z0-9_]{20,}/;
+const OPAQUE_TOKEN_RE = /[A-Za-z0-9_]{20,}/g;
 const VALUE_HAS_DIGIT_RE = /\d/;
 
 // A value that is ENTIRELY a long base64 (40+ chars, optional `=` padding) or
@@ -1097,10 +1276,17 @@ function rawParams(qs) {
  */
 function paramExfilReason(name, value) {
   if (BENIGN_BLOB_PARAM_RE.test(name)) return null;
+  // A leaked credential is an OPAQUE, separator-free token. Gate the
+  // secret-shape/digit test on the CONTIGUOUS opaque run(s) of the value, not on
+  // the whole prose value: a benign path-like value (`?redirect=/authorization-
+  // service/…abcdefghij1234567890`) otherwise matches "authorization" in one
+  // place and a 20-char run in another and false-fires. Requiring both on the
+  // SAME run keeps `ghp_…`-style contiguous tokens firing while dropping prose.
+  const opaqueRuns = value.match(OPAQUE_TOKEN_RE);
   if (
-    OPAQUE_TOKEN_RE.test(value) &&
-    VALUE_HAS_DIGIT_RE.test(value) &&
-    matchesSecretHint(value)
+    opaqueRuns?.some(
+      (run) => VALUE_HAS_DIGIT_RE.test(run) && matchesSecretHint(run),
+    )
   )
     return "credential-shaped token in URL parameter";
   if (isBlobValue(value) || decodedBlobMatch(value))
@@ -1296,22 +1482,63 @@ function metaRefreshUrl(content) {
   return match ? match.groups.url : null;
 }
 
+// HTML whitespace per the `srcset` grammar (ASCII whitespace).
+const SRCSET_WS_RE = /[ \t\n\f\r]/;
+
 /**
- * Candidate URLs of a `srcset` (a comma-separated "url descriptor" string) or
- * `ping` (a space-separated url list rehype delivers as an array) attribute.
- * Each candidate's leading whitespace-delimited token is its url (the trailing
- * `2x`/`100w` descriptor, or extra ping urls, are dropped to the next
- * candidate). An absent attribute (neither string nor array) yields none.
+ * URLs of a `srcset` value, parsed per the WHATWG "parse a srcset attribute"
+ * grammar rather than a naive `split(",")`: a candidate's URL is a run of
+ * non-whitespace characters, so a URL that itself contains commas (a `data:`
+ * URI, or a query with `,`) is kept intact. A comma only separates candidates
+ * when it trails the URL run or follows the (paren-aware) descriptor. Trailing
+ * commas on the URL run mark a candidate with no descriptor.
+ * @param {string} value
+ * @returns {string[]}
+ */
+function parseSrcset(value) {
+  /** @type {string[]} */ const urls = [];
+  let i = 0;
+  const n = value.length;
+  while (i < n) {
+    while (i < n && (SRCSET_WS_RE.test(value[i]) || value[i] === ",")) i++;
+    const start = i;
+    while (i < n && !SRCSET_WS_RE.test(value[i])) i++;
+    const run = value.slice(start, i);
+    const url = run.replace(/,+$/, "");
+    if (url) urls.push(url);
+    // A URL run ending in a comma is a bare candidate (no descriptor); the
+    // comma already delimits the next one, so skip descriptor parsing.
+    if (run.endsWith(",")) continue;
+    // Otherwise consume the descriptor up to the first unparenthesized comma.
+    let depth = 0;
+    while (i < n) {
+      const c = value[i];
+      if (c === "(") depth++;
+      else if (c === ")" && depth > 0) depth--;
+      else if (c === "," && depth === 0) {
+        i++;
+        break;
+      }
+      i++;
+    }
+  }
+  return urls;
+}
+
+/**
+ * Candidate URLs of a `srcset` (a "url descriptor" string parsed per the HTML
+ * grammar) or `ping` (a space-separated url list rehype delivers as an array)
+ * attribute. An absent attribute (neither string nor array) yields none.
  * @param {unknown} value
  * @returns {string[]}
  */
 function multiUrlAttr(value) {
-  /** @type {string[]} */ let candidates = [];
-  if (Array.isArray(value)) candidates = value.map(String);
-  else if (typeof value === "string") candidates = value.split(",");
-  return candidates
-    .map((candidate) => candidate.trim().split(/\s+/)[0])
-    .filter(Boolean);
+  if (Array.isArray(value))
+    return value
+      .map((candidate) => String(candidate).trim().split(/\s+/)[0])
+      .filter(Boolean);
+  if (typeof value === "string") return parseSrcset(value);
+  return [];
 }
 
 /**

