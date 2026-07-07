@@ -41,10 +41,24 @@ jobs:
         if: steps.extract.outputs.has_lessons == 'true'
         env:
           GITLEAKS_VERSION: "8.30.1"
+          # Published SHA-256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz.
+          # Verify before extracting so a tampered release asset can't inject a
+          # malicious binary next to the TEMPLATE_SYNC_TOKEN step. MUST match
+          # GITLEAKS_VERSION and stay in lockstep with gitleaks.yaml's pin.
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          # Download to a file (not a pipe) so the digest is verified before extract.
           curl --proto '=https' -sSfL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar xz -C /usr/local/bin gitleaks
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" \
+            -o "$tarball"
+          case "$GITLEAKS_SHA256" in
+            PLACEHOLDER_*)
+              echo "::error::GITLEAKS_SHA256 is still the placeholder. Set the real published SHA-256 for gitleaks ${GITLEAKS_VERSION} before this scan can run." >&2
+              exit 1 ;;
+          esac
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          tar xz -C /usr/local/bin -f "$tarball" gitleaks
           gitleaks detect --no-git -s /tmp/phone-home -v
 
       - name: Submit to template repo
