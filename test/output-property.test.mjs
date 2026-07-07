@@ -21,6 +21,7 @@ import {
   sanitizeValue,
   deleteVerbatimSpans,
   MAX_DEPTH,
+  FILTER_WARNING,
 } from "../src/output.mjs";
 import { SGR_RE } from "../src/invisible.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
@@ -80,7 +81,13 @@ describe("property: sanitizeText invariants (Layer 1 only)", () => {
       fc.asyncProperty(adversarialInput, async (input) => {
         const r = await sanitizeText(input);
         assert.equal(typeof r.cleaned, "string");
-        assert.ok(!r.cleaned.includes(""), "raw ESC survived Layer 1");
+        // No raw ESC introducer may survive Layer 1. Built from the ESC constant
+        // (a code point) so this source holds no literal control byte (T2/T6).
+        assert.doesNotMatch(
+          r.cleaned,
+          new RegExp(`[${ESC}]`),
+          "raw ESC survived Layer 1",
+        );
         assert.doesNotMatch(
           r.cleaned,
           LONG_INVISIBLE_RUN,
@@ -275,16 +282,89 @@ describe("property: deleteVerbatimSpans only deletes", () => {
     maxLength: 4,
   });
 
-  it("output length never grows and removed counts the cut spans", () => {
+  it("output equals the text with every span independently removed (no injected bytes)", () => {
     fc.assert(
       fc.property(safeText, spanArb, (text, spans) => {
         const { text: out, removed } = deleteVerbatimSpans(text, spans);
+        // A length-only invariant can't catch an INJECTION: a buggy deleter that
+        // both removed bytes and spliced new ones in could still shrink the text.
+        // Compute the expected residue INDEPENDENTLY (replaceAll, a different code
+        // path than deleteVerbatimSpans's split/join) — it only ever removes bytes
+        // already present in `text`, so any byte in `out` that did not come from
+        // `text` fails this exact-equality check.
+        let expected = text;
+        let expectedRemoved = 0;
+        for (const span of spans) {
+          if (!span) continue;
+          expectedRemoved += expected.split(span).length - 1;
+          expected = expected.replaceAll(span, "");
+        }
+        assert.equal(out, expected);
+        assert.equal(removed, expectedRemoved);
         assert.ok(out.length <= text.length, "output grew");
-        assert.ok(removed >= 0);
-        // A non-zero removal must shorten the text; a zero removal leaves it.
-        if (removed === 0) assert.equal(out, text);
-        else assert.ok(out.length < text.length);
       }),
+      runOptions,
+    );
+  });
+});
+
+// ─── invariant: a Layer-5 filter can only DELETE, never INJECT ───────────────
+
+describe("property: no filterInjection-supplied byte reaches the model-facing context", () => {
+  const benignChar = fc.constantFrom(..."abcXYZ 0123".split(""));
+  const benign = fc
+    .array(benignChar, { maxLength: 60 })
+    .map((parts) => parts.join(""));
+  // Spans the hostile filter asks to delete (some present in text, some not).
+  const spanArb = fc.array(fc.constantFrom("X", "Y", "Z", "ab", "XYZ", ""), {
+    maxLength: 4,
+  });
+  // The filter may return a valid enum code or no warning at all.
+  const codeArb = fc.constantFrom(undefined, ...Object.values(FILTER_WARNING));
+
+  it("cleaned is the input with spans DELETED (never injected) and warnings are library-owned only", async () => {
+    await fc.assert(
+      fc.asyncProperty(benign, spanArb, codeArb, async (text, spans, code) => {
+        const filterInjection = () =>
+          code === undefined
+            ? { removeSpans: spans }
+            : { removeSpans: spans, warning: code };
+        const r = await sanitizeText(text, { filterInjection });
+        // Deletion-only: cleaned equals the input with those spans removed by
+        // an INDEPENDENT oracle — any filter-injected byte would break this.
+        let expected = text;
+        for (const s of spans) if (s) expected = expected.replaceAll(s, "");
+        assert.equal(r.cleaned, expected);
+        // Benign input yields no Layer-1 finding, so the ONLY possible warning
+        // is the filter's — and it must be a LIBRARY-owned message (the mapped
+        // enum), never the raw code or filter free text. All three library
+        // messages start with this stable marker.
+        for (const w of r.warnings) {
+          assert.notEqual(w, code);
+          assert.match(w, /^Layer-5 injection filter/);
+        }
+        assert.ok(r.warnings.length <= 1);
+      }),
+      runOptions,
+    );
+  });
+
+  it("a free-text (non-enum) warning throws instead of reaching warnings", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .string({ maxLength: 40 })
+          .filter((s) => !Object.values(FILTER_WARNING).includes(s)),
+        async (poison) => {
+          await assert.rejects(
+            () =>
+              sanitizeText("clean docs", {
+                filterInjection: () => ({ warning: poison }),
+              }),
+            /unrecognized warning value/,
+          );
+        },
+      ),
       runOptions,
     );
   });

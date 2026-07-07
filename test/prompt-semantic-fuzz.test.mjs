@@ -114,7 +114,7 @@ describe("semantic-correctness fuzz: classifyPrompt precision on mixed prompts",
           `prompt=${JSON.stringify(prompt)}`,
         );
       }),
-      fcRunOptions(),
+      fcRunOptions({ numRuns: 500 }),
     );
   });
 
@@ -139,7 +139,7 @@ describe("semantic-correctness fuzz: classifyPrompt precision on mixed prompts",
           assert.match(verdict.reason, /Resubmit the prompt/);
         },
       ),
-      fcRunOptions(),
+      fcRunOptions({ numRuns: 500 }),
     );
   });
 });
