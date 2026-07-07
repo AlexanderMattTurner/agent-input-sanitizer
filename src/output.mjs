@@ -29,6 +29,71 @@ import { HTML_TAG_PRESENT, MD_LINK_HINT } from "./gates.mjs";
 import { applyLayer1, LONE_SURROGATE_RE } from "./layer1.mjs";
 
 /**
+ * Closed enum of LIBRARY-OWNED Layer-5 warning codes — the ONLY warning values
+ * the injected `filterInjection` seam may return. This mirrors the `found`-code
+ * contract (`CATEGORY` in ./invisible.mjs): the seam speaks a fixed vocabulary
+ * of codes, and the LIBRARY owns the human-readable string each maps to. Free
+ * text from the filter is REFUSED (see `mapFilterWarning`), because the filter
+ * runs on attacker-influenced content and its output is concatenated into the
+ * model-facing context WITHOUT passing back through Layer 1 — so a compromised
+ * or prompt-injected filter that could emit arbitrary `warning` text would
+ * defeat the "a compromised filter can only remove bytes, never inject" seam
+ * contract. Branch on these codes; the prose below is not part of the contract.
+ * @type {Readonly<{ SPANS_REMOVED: "spans-removed", FILTER_FLAGGED: "filter-flagged", FILTER_ERROR: "filter-error" }>}
+ */
+export const FILTER_WARNING = Object.freeze({
+  // The filter removed one or more verbatim spans it judged to be injection.
+  SPANS_REMOVED: "spans-removed",
+  // The filter flagged the content as a possible injection without deleting.
+  FILTER_FLAGGED: "filter-flagged",
+  // The filter reported an internal error while scanning (non-fatal — the
+  // pipeline still returns the Layer-1..4 output; a fatal filter should throw).
+  FILTER_ERROR: "filter-error",
+});
+
+// code -> library-owned human label, the ONLY text a Layer-5 warning can put
+// into `warnings`. Decoupled from FILTER_WARNING so the prose can be reworded
+// without a breaking change to anyone branching on the codes.
+/** @type {Readonly<Record<string, string>>} */
+const FILTER_WARNING_LABELS = Object.freeze({
+  [FILTER_WARNING.SPANS_REMOVED]:
+    "Layer-5 injection filter removed one or more verbatim spans it flagged as prompt injection",
+  [FILTER_WARNING.FILTER_FLAGGED]:
+    "Layer-5 injection filter flagged this tool output as a possible prompt injection (content not modified)",
+  [FILTER_WARNING.FILTER_ERROR]:
+    "Layer-5 injection filter reported an internal error while scanning this tool output",
+});
+
+/**
+ * Map a Layer-5 filter `warning` value to its library-owned message, or THROW
+ * if it is not a known {@link FILTER_WARNING} code. Failing loud here is the
+ * seam contract: the filter may only speak the closed code vocabulary, never
+ * push its own bytes into the model-facing `warnings`.
+ * @param {unknown} code
+ * @returns {string}
+ */
+function mapFilterWarning(code) {
+  // Object.hasOwn, not a bare index: a bare `FILTER_WARNING_LABELS[code]` would
+  // resolve inherited Object.prototype members ("valueOf", "toString",
+  // "constructor", …) to real functions instead of undefined, letting a filter
+  // smuggle a non-code value past the enum guard.
+  const label =
+    typeof code === "string" && Object.hasOwn(FILTER_WARNING_LABELS, code)
+      ? FILTER_WARNING_LABELS[code]
+      : undefined;
+  if (label === undefined)
+    throw new Error(
+      `Layer-5 filterInjection returned an unrecognized warning value ${JSON.stringify(
+        code,
+      )}; it must be one of the FILTER_WARNING enum codes ` +
+        `(${Object.values(FILTER_WARNING).join(", ")}). Free-text filter ` +
+        "warnings are refused so a compromised filter cannot inject bytes into " +
+        "the model-facing context.",
+    );
+  return label;
+}
+
+/**
  * Message from a caught value (`unknown` under strict mode), with one level of
  * cause chain appended so a wrapped failure reads "outer: root".
  * @param {unknown} err
@@ -44,9 +109,13 @@ function errMessage(err) {
  * @typedef {{ text: string, found: string[], note?: string }} RedactResult
  *   Layer-4 result: the redacted text, the category labels redacted, and an
  *   optional caller-supplied annotation appended to the warning.
- * @typedef {{ removeSpans?: string[], warning?: string }} Layer5Result
+ * @typedef {"spans-removed" | "filter-flagged" | "filter-error"} FilterWarningCode
+ *   A {@link FILTER_WARNING} enum code — the closed vocabulary the Layer-5 seam
+ *   may return in `warning`. See FILTER_WARNING for the meanings.
+ * @typedef {{ removeSpans?: string[], warning?: FilterWarningCode }} Layer5Result
  *   Layer-5 result: verbatim spans to delete (the only mutation a filter may
- *   request) and/or a warning. Null means the filter made no finding.
+ *   request) and/or a warning CODE (never free text — the library owns the
+ *   message). Null means the filter made no finding.
  */
 
 /**
@@ -325,7 +394,10 @@ export async function sanitizeText(text, options = {}) {
             );
         }
       }
-      if (res.warning) warnings.push(res.warning);
+      // A filter warning is a library-owned ENUM CODE, mapped here to its fixed
+      // message; free text is refused (throws) so no filter-supplied byte ever
+      // reaches the model-facing context. `null`/`undefined` means no warning.
+      if (res.warning != null) warnings.push(mapFilterWarning(res.warning));
     }
   }
 
@@ -383,7 +455,7 @@ const CYCLE_PLACEHOLDER = "[withheld: circular reference in structured output]";
  * @returns {Promise<{ value: any, modified: boolean, sgrNote: boolean }>}
  */
 export async function sanitizeValue(value, options, warnings) {
-  return sanitizeValueAt(value, options, warnings, 0, new WeakSet());
+  return sanitizeValueAt(value, options, warnings, 0, new WeakSet(), new Map());
 }
 
 /**
@@ -397,9 +469,19 @@ export async function sanitizeValue(value, options, warnings) {
  * @param {string[]} warnings
  * @param {number} depth
  * @param {WeakSet<object>} seen
+ * @param {Map<object, { value: any, modified: boolean, sgrNote: boolean }>} memo
+ *   Per-object cache of the FULLY-PROCESSED result, keyed by input reference.
+ *   Without it a shared-substructure DAG (one node reached by many parents) is
+ *   re-sanitized once per PATH — exponential in the number of shared nodes (a
+ *   ~25-object diamond measured at 68 s, far under MAX_DEPTH) — since the path-
+ *   scoped `seen` set only guards cycles, not repeated work. Only completed
+ *   subtrees are cached; the depth/cycle placeholders are path-dependent and
+ *   deliberately NOT cached (a node withheld for depth on a long path must still
+ *   be walked on a shorter one). Because warnings dedup in composeContext,
+ *   skipping a cached node's duplicate warnings is harmless.
  * @returns {Promise<{ value: any, modified: boolean, sgrNote: boolean }>}
  */
-async function sanitizeValueAt(value, options, warnings, depth, seen) {
+async function sanitizeValueAt(value, options, warnings, depth, seen, memo) {
   if (typeof value === "string") {
     const result = await sanitizeText(value, options);
     warnings.push(...result.warnings);
@@ -408,6 +490,15 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
       modified: result.modified,
       sgrNote: result.sgrNote,
     };
+  }
+  // Memo hit: a shared node already fully sanitized on another path. Returning
+  // the cached result (same reference) collapses the DAG to linear work and
+  // preserves shape; it never short-circuits the cycle guard, since an on-stack
+  // ancestor is not cached until its subtree completes.
+  const isObject = value !== null && typeof value === "object";
+  if (isObject) {
+    const cached = memo.get(value);
+    if (cached !== undefined) return cached;
   }
   // Exotic objects (Map/Set/Date/typed array/…) pass through opaque: walking
   // them via Object.entries would drop their real contents (see
@@ -428,17 +519,28 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
     // by the same "unreachable, can't vouch for it" logic.
     const isNonEmptyMapOrSet =
       (value instanceof Map || value instanceof Set) && value.size > 0;
+    // A non-empty ArrayBuffer view (typed array / Buffer / DataView) carries raw
+    // bytes we cannot walk or decode-sanitize without guessing an encoding, yet a
+    // harness that stringifies it (e.g. Buffer.toString) can surface hidden text
+    // to the model. Flag it — passed through unchanged (precision) but never
+    // silently vouched for. An EMPTY view has no bytes, so it stays silent, like
+    // an empty Map/Set, to avoid alert fatigue on benign zero-length buffers.
+    const isNonEmptyArrayBufferView =
+      ArrayBuffer.isView(value) && value.byteLength > 0;
     if (
       isNonEmptyMapOrSet ||
+      isNonEmptyArrayBufferView ||
       (value !== null &&
         typeof value === "object" &&
         !ArrayBuffer.isView(value) &&
         Object.keys(value).length > 0)
     )
       warnings.push(
-        "An object with a non-plain prototype (e.g. a class instance, Map, or Set) in structured tool output was passed through unsanitized — its properties could not be walked without corrupting the object's shape",
+        "An object with a non-plain prototype (e.g. a class instance, Map, Set, or typed array/Buffer) in structured tool output was passed through unsanitized — its contents could not be walked without corrupting the object's shape",
       );
-    return { value, modified: false, sgrNote: false };
+    const leafResult = { value, modified: false, sgrNote: false };
+    if (isObject) memo.set(value, leafResult);
+    return leafResult;
   }
 
   // Fail closed before descending into a container: a back-edge to an ancestor
@@ -468,12 +570,15 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
           warnings,
           depth + 1,
           seen,
+          memo,
         );
         out.push(result.value);
         if (result.modified) modified = true;
         if (result.sgrNote) sgrNote = true;
       }
-      return { value: out, modified, sgrNote };
+      const arrResult = { value: out, modified, sgrNote };
+      memo.set(value, arrResult);
+      return arrResult;
     }
     /** @type {Record<string, any>} */
     const out = {};
@@ -499,6 +604,7 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
         warnings,
         depth + 1,
         seen,
+        memo,
       );
       // Bracket assignment on a literal "__proto__" key triggers the special
       // Object.prototype setter instead of creating an own property — the
@@ -514,7 +620,9 @@ async function sanitizeValueAt(value, options, warnings, depth, seen) {
       if (result.modified) modified = true;
       if (result.sgrNote) sgrNote = true;
     }
-    return { value: out, modified, sgrNote };
+    const objResult = { value: out, modified, sgrNote };
+    memo.set(value, objResult);
+    return objResult;
   } finally {
     seen.delete(value);
   }
@@ -556,7 +664,7 @@ export function composeContext(
  * @returns {any}
  */
 export function suppressToolOutput(value, message) {
-  return suppressAt(value, message, 0, new WeakSet());
+  return suppressAt(value, message, 0, new WeakSet(), new Map());
 }
 
 /**
@@ -566,19 +674,31 @@ export function suppressToolOutput(value, message) {
  * @param {string} message
  * @param {number} depth
  * @param {WeakSet<object>} seen
+ * @param {Map<object, any>} memo  per-object cache of the suppressed subtree, so
+ *   a shared-substructure DAG collapses to linear work instead of being rebuilt
+ *   once per path (see {@link sanitizeValueAt}'s memo for the full rationale).
  * @returns {any}
  */
-function suppressAt(value, message, depth, seen) {
+function suppressAt(value, message, depth, seen, memo) {
   if (typeof value === "string") return message;
   // Same opaque-leaf rule as sanitizeValueAt: only arrays and plain objects are
   // walked; an exotic object would be corrupted to an empty clone.
   if (!isWalkableContainer(value)) return value;
+  const cached = memo.get(value);
+  if (cached !== undefined) return cached;
+  // Path-dependent placeholder: NOT cached (a node on a deep path is withheld,
+  // the same node on a short path is walked — see sanitizeValueAt).
   if (seen.has(value) || depth >= MAX_DEPTH) return message;
 
   seen.add(value);
   try {
-    if (Array.isArray(value))
-      return value.map((item) => suppressAt(item, message, depth + 1, seen));
+    if (Array.isArray(value)) {
+      const out = value.map((item) =>
+        suppressAt(item, message, depth + 1, seen, memo),
+      );
+      memo.set(value, out);
+      return out;
+    }
     /** @type {Record<string, any>} */
     const out = {};
     for (const [key, item] of Object.entries(value))
@@ -586,11 +706,12 @@ function suppressAt(value, message, depth, seen) {
       // "__proto__" key hits the special setter instead of creating an own
       // property, silently dropping the field and mutating out's prototype.
       Object.defineProperty(out, key, {
-        value: suppressAt(item, message, depth + 1, seen),
+        value: suppressAt(item, message, depth + 1, seen, memo),
         enumerable: true,
         writable: true,
         configurable: true,
       });
+    memo.set(value, out);
     return out;
   } finally {
     seen.delete(value);

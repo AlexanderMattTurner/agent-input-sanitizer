@@ -146,7 +146,7 @@ describe("semantic-correctness fuzz: sanitizeValue leaf precision", () => {
         assert.deepEqual(result.value, expected);
         assert.equal(result.modified, bad);
       }),
-      fcRunOptions(),
+      fcRunOptions({ numRuns: 500 }),
     );
   });
 });
@@ -178,7 +178,7 @@ describe("semantic-correctness fuzz: sanitizeText span-deletion precision on mix
           );
         },
       ),
-      fcRunOptions(),
+      fcRunOptions({ numRuns: 500 }),
     );
   });
 });

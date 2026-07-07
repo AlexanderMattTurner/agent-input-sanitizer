@@ -23,6 +23,7 @@ import {
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
   countPayloadInvisible,
+  stripInvisible,
   isSgrOnly,
   SGR_RE,
 } from "./invisible.mjs";
@@ -112,7 +113,25 @@ export function classifyPrompt(prompt, strip = stripAnsiFully) {
   // joiner-dense multilingual prompt (formal Persian, an emoji ZWJ sequence) is
   // not blocked by sheer joiner count. This mirrors carveStrip's own
   // payloadInvis < SCATTERED_THRESHOLD gate so the block and strip layers agree.
-  const invisibleCount = countPayloadInvisible(deAnsi);
+  const payloadInvisible = countPayloadInvisible(deAnsi);
+  // Preserved-joiner covert channel (O3). countPayloadInvisible EXCLUDES the
+  // ZWNJ/ZWJ (and emoji selectors) that do real rendering work, so a channel
+  // built entirely from MEANINGFUL joiners — an attacker alternates
+  // `letter joiner letter joiner …` so every joiner sits between two cursive
+  // letters — counts as ZERO here and would pass, even though the strip layer
+  // (carveStrip) only PRESERVES joiners up to a per-document budget
+  // (TOTAL_PRESERVED_JOINER_BUDGET / CONSECUTIVE_JOINER_CAP) and strips the
+  // surplus as payload. A prompt channel cannot strip, only block, so mirror
+  // that budget by counting the joiners the strip layer WOULD remove — delegated
+  // to stripInvisible (the SSOT) rather than re-deriving the budget here, which
+  // would risk drift — and fold that surplus into the count the scatter gate
+  // sees. A leading BOM is preserved by the strip but counted by
+  // countPayloadInvisible, so the difference can go slightly negative; clamp it.
+  const surplusPreservedJoiners = Math.max(
+    0,
+    [...deAnsi].length - [...stripInvisible(deAnsi)].length - payloadInvisible,
+  );
+  const invisibleCount = payloadInvisible + surplusPreservedJoiners;
   const invisiblesBelowThreshold =
     longRunSample === null && invisibleCount < SCATTERED_THRESHOLD;
 

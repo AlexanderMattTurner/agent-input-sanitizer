@@ -104,6 +104,49 @@ describe("classifyPrompt: invisible-char thresholds block", () => {
   });
 });
 
+// ─── block: preserved-joiner covert channel (O3) ─────────────────────────────
+
+describe("classifyPrompt: preserved-joiner covert channel", () => {
+  const ZWNJ = cp(0x200c);
+  const ZWJ = cp(0x200d);
+
+  it("blocks a ZWNJ channel stuffed between cursive letters past the preserve budget", () => {
+    // Each ZWNJ sits between two cursive Arabic letters (م/ی, both dual-joining),
+    // so the payload-invisible count (which excludes meaningful joiners) is ZERO
+    // and the pre-O3 gate waved it through. The strip layer only PRESERVES
+    // joiners up to its per-document budget and strips the surplus, so counting
+    // that surplus surfaces the channel: 120 joiners, ~16 preserved, ~104 surplus
+    // — well past the scattered threshold — must block.
+    const channel = (cp(0x645) + ZWNJ + cp(0x6cc) + ZWNJ).repeat(60);
+    const verdict = classifyPrompt(channel);
+    assert.equal(verdict.action, "block");
+    assert.match(verdict.reason, /Format chars/);
+  });
+
+  it("blocks a ZWJ channel the same way (surplus joiners are payload)", () => {
+    const channel = (cp(0x645) + ZWJ + cp(0x6cc) + ZWJ).repeat(60);
+    assert.equal(classifyPrompt(channel).action, "block");
+  });
+
+  it("still PASSES a joiner-dense but UNDER-budget prompt (no false positive)", () => {
+    // Three real emoji ZWJ family sequences (3 joiners each = 9 preserved
+    // joiners) sit comfortably under TOTAL_PRESERVED_JOINER_BUDGET, so the strip
+    // layer keeps them all — surplus 0 — and the prompt passes untouched.
+    const family =
+      cp(0x1f468) + ZWJ + cp(0x1f469) + ZWJ + cp(0x1f467) + ZWJ + cp(0x1f466);
+    const prompt = `${family} ${family} ${family}`;
+    assert.deepEqual(classifyPrompt(prompt), { action: "pass" });
+  });
+
+  it("still PASSES a formal-Persian ZWNJ prompt of ordinary density", () => {
+    // A dozen Persian words each carrying one linguistic ZWNJ: 12 preserved
+    // joiners, under budget, so it must not be mistaken for a covert channel.
+    const word = cp(0x645) + cp(0x6cc) + ZWNJ + cp(0x62e);
+    const prompt = Array.from({ length: 12 }, () => word).join(" ");
+    assert.deepEqual(classifyPrompt(prompt), { action: "pass" });
+  });
+});
+
 // ─── block: ANSI ─────────────────────────────────────────────────────────────
 
 describe("classifyPrompt: non-SGR ANSI blocks", () => {

@@ -128,6 +128,17 @@ delete** (never replacement text), so even a compromised filter can only remove
 legitimate content—it can never inject bytes into the model’s view. A live
 second-LLM injection filter is the caller’s to wire behind that contract.
 
+The same "never inject" property governs the filter’s `warning`: it is a
+**closed enum code** (`FILTER_WARNING`: `spans-removed` / `filter-flagged` /
+`filter-error`), and the **library**—not the filter—owns the human-readable
+string each code maps into `warnings`. This closes a seam the delete-only span
+contract left open: `warnings` is concatenated into the model-facing context
+**without** re-running Layer 1, so a compromised or prompt-injected filter that
+could return free-text `warning` would smuggle attacker bytes straight to the
+model. A filter that returns any value outside the enum makes the pipeline
+**throw** (fail loud), exactly as an unrunnable Layer-4 redactor does—no
+filter-supplied byte (span or warning) ever reaches the model’s view.
+
 ## Edit-repair / rehydration
 
 Sanitizing the model’s view of a file makes that view diverge from disk: Layer 1

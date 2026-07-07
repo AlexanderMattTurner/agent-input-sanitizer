@@ -67,6 +67,25 @@ without notice.
 | `hidden-html`         | Elements hidden via CSS/attribute (`display:none`, `hidden`, etc.) spliced out by Layer 2               |
 | `exfil-urls`          | Exfil-shaped URLs detected by Layer 3 (reported, not removed)                                           |
 
+### `FILTER_WARNING` codes (Layer 5)
+
+The Layer-5 `filterInjection` seam is deliberately thin: the injected filter may
+only ask for **verbatim span deletions** (`removeSpans`) and may only warn with a
+**closed enum code** (`warning`), never free text. Because the filter runs on
+attacker-influenced content and its `warning` would otherwise be concatenated
+straight into the model-facing context **without** re-passing Layer 1, a
+compromised or prompt-injected filter emitting arbitrary text would defeat the
+"a compromised filter can only remove bytes, never inject" contract. So the
+**library owns the message** for each code, and a filter returning any value
+outside this enum makes `sanitizeText` **throw** (fail loud). Branch on the code,
+like `found`:
+
+| `FILTER_WARNING` code | Meaning                                                                                 |
+| --------------------- | --------------------------------------------------------------------------------------- |
+| `spans-removed`       | The filter removed one or more verbatim spans it flagged as prompt injection            |
+| `filter-flagged`      | The filter flagged the output as a possible injection without deleting (content intact) |
+| `filter-error`        | The filter reported a non-fatal internal error while scanning (a fatal filter throws)   |
+
 ## How this compares
 
 The "sanitize untrusted LLM input" space mostly splits into two camps: ML
@@ -138,6 +157,8 @@ await sanitizeText(toolText, {
   exfilScan: isUntrustedIngress,
   redact: async (t) => myRedactor.redact(t), // -> { text, found, note? } | null
   filterInjection: (t) => mySemanticFilter(t), // -> { removeSpans, warning } | null
+  //   removeSpans: verbatim spans to delete (delete-only — never replacement text)
+  //   warning:     a FILTER_WARNING enum CODE, never free text (see below)
 });
 
 import { rehydrateRedacted } from "agent-input-sanitizer/rehydrate";
