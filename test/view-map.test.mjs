@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   occurrences,
+  overlapAwareCount,
   alignDeletions,
   resolveSpan,
   rehydrateNewString,
@@ -43,6 +44,28 @@ describe("occurrences", () => {
     // reported once each without revisiting an index.
     assert.deepEqual(occurrences("aaa", "a"), [0, 1, 2]);
     assert.deepEqual(occurrences("aXa", "a"), [0, 2]);
+  });
+});
+
+// ─── overlapAwareCount (R5) ──────────────────────────────────────────────────
+
+describe("overlapAwareCount", () => {
+  it("counts self-overlapping matches that occurrences() steps past", () => {
+    // "aa" in "aaa" is ONE non-overlapping match but TWO overlapping ones; the
+    // ambiguity gate must see the overlapping count to flag it.
+    assert.equal(occurrences("aaa", "aa").length, 1);
+    assert.equal(overlapAwareCount("aaa", "aa"), 2);
+    assert.equal(overlapAwareCount("aaaa", "aa"), 3);
+  });
+
+  it("agrees with occurrences() when matches do not overlap", () => {
+    assert.equal(overlapAwareCount("abcabc", "abc"), 2);
+    assert.equal(overlapAwareCount("xyz", "q"), 0);
+    assert.equal(overlapAwareCount("a", "a"), 1);
+  });
+
+  it("returns 0 for an empty needle (no infinite loop)", () => {
+    assert.equal(overlapAwareCount("anything", ""), 0);
   });
 });
 
@@ -265,6 +288,30 @@ describe("rehydrateNewString", () => {
     assert.match(out.deny, /multiple distinct secrets/);
   });
 
+  it("R6: a secret whose bytes contain another placeholder text is not re-substituted", () => {
+    // The per-placeholder branch (new_string uses PH twice, so the sequence is
+    // not 1:1 with the span) must build the output in ONE pass. Here SECRET_A's
+    // bytes literally contain PH_KEY's placeholder text: a chained
+    // split(PH).join(secret) then split(PH_KEY).join(SECRET_B) would clobber the
+    // PH_KEY substring INSIDE the just-inserted SECRET_A. A single ordered pass
+    // never re-scans inserted bytes.
+    const SECRET_WITH_PH_KEY = `val${PH_KEY}end`;
+    const spanPairs = [
+      { placeholder: PH, original: SECRET_WITH_PH_KEY, start: 0 },
+      { placeholder: PH_KEY, original: SECRET_B, start: 50 },
+    ];
+    const oldS = `${PH} ${PH_KEY}`;
+    const newS = `${PH} ${PH} ${PH_KEY}`; // PH twice ⇒ not a 1:1 sequence
+    const out = rehydrateNewString(oldS, newS, spanPairs, spanPairs);
+    assert.equal(
+      out.text,
+      `${SECRET_WITH_PH_KEY} ${SECRET_WITH_PH_KEY} ${SECRET_B}`,
+    );
+    // The PH_KEY text survives verbatim inside each inserted SECRET_A.
+    assert.equal(occurrences(out.text, PH_KEY).length, 2);
+    assert.deepEqual(out.secrets, [SECRET_WITH_PH_KEY, SECRET_B]);
+  });
+
   it("filePairs deduplicates: a placeholder absent from new_string is skipped", () => {
     // filePairs references PH_KEY but new_string never mentions it ⇒ the
     // `!newS.includes(phText)` guard continues past it without denying.
@@ -305,6 +352,31 @@ describe("pairsToUtf16", () => {
   it("returns the empty pairs array unchanged", () => {
     const empty = [];
     assert.equal(pairsToUtf16("🔑 no pairs", empty), empty);
+  });
+
+  it("throws on an out-of-range start instead of yielding an undefined offset (R7)", () => {
+    // A redactor offset past the end of `text` indexes the prefix table out of
+    // range; silently returning `start: undefined` poisons every downstream
+    // comparison. Fail loudly on high, negative, and non-integer offsets.
+    const text = "abc"; // 3 code points → valid starts are 0..3
+    assert.throws(
+      () => pairsToUtf16(text, [{ placeholder: PH, original: "x", start: 4 }]),
+      /out of range \[0, 3\]/,
+    );
+    assert.throws(
+      () => pairsToUtf16(text, [{ placeholder: PH, original: "x", start: -1 }]),
+      /out of range/,
+    );
+    assert.throws(
+      () =>
+        pairsToUtf16(text, [{ placeholder: PH, original: "x", start: 1.5 }]),
+      /out of range/,
+    );
+    // Boundary: start === codePoints.length (points at the very end) is valid.
+    assert.deepEqual(
+      pairsToUtf16(text, [{ placeholder: PH, original: "x", start: 3 }]),
+      [{ placeholder: PH, original: "x", start: 3 }],
+    );
   });
 
   it("normalizes several pairs, each by the astral count preceding it", () => {

@@ -120,6 +120,15 @@ const OPS = {
     return classifyPrompt(req.text);
   },
 
+  // SECURITY (R8): `scanInstructionFiles` and `cleanFile` take filesystem
+  // paths/globs straight from the request and read (and, for cleanFile, WRITE)
+  // whatever they resolve to, with NO root confinement — `cwd`/`path`/`globs`
+  // may escape any directory (absolute paths, `..`, symlinks). Unlike the
+  // text-in/text-out ops, the request here names files on the host. The stdin
+  // peer that sends these requests must therefore be FULLY TRUSTED: never wire
+  // this CLI's stdin to untrusted/model-controlled input for these ops. If you
+  // must accept untrusted callers, add opt-in root confinement (reject paths
+  // that resolve outside an allow-listed root) before exposing them.
   async scanInstructionFiles(req) {
     if (
       !Array.isArray(req.globs) ||

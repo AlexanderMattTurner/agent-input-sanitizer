@@ -116,6 +116,11 @@ function pickSpan(view, startSeed, lenSeed) {
 
 describe("rehydrate: properties", () => {
   it("never mis-anchors and round-trips the model's intended edit", async () => {
+    // T4: invariants 2 + 5 (round-trip and no-exposure) only run inside the
+    // unambiguous single-match precondition below. Count how often that branch
+    // is actually taken so a fixture/generator change that stops reaching it can
+    // never let the property pass vacuously.
+    let sawRoundTrip = 0;
     await fc.assert(
       fc.asyncProperty(
         contentArb,
@@ -170,6 +175,7 @@ describe("rehydrate: properties", () => {
             occ(content, updatedOld).length === 1 &&
             occ(view, oldS).length === 1
           ) {
+            sawRoundTrip++;
             const newDisk = content.replace(
               updatedOld,
               result.updatedInput.new_string,
@@ -190,6 +196,10 @@ describe("rehydrate: properties", () => {
         },
       ),
       runOptions,
+    );
+    assert.ok(
+      sawRoundTrip > 0,
+      "round-trip/no-exposure precondition never held — property passed vacuously",
     );
   });
 
@@ -228,5 +238,89 @@ describe("rehydrate: properties", () => {
       ),
       runOptions,
     );
+  });
+
+  it("never splices a byte inside a redacted secret's on-disk span (deny, never guess)", async () => {
+    // A file with a secret at a KNOWN disk span. We fuzz old_string over a pool
+    // that includes fragments living only inside the secret, boundary-crossing
+    // slices, visible text, whole-secret rotations, and self-overlapping runs —
+    // with and without replace_all. INVARIANT: whenever the layer returns a
+    // rewrite, applying it must leave the secret's on-disk bytes intact UNLESS
+    // the model's old_string wholly contained them. Any edit that would read or
+    // split bytes inside the span must deny, never pass through to a raw edit.
+    const secret = SECRET_A;
+    const prefix = "PASSWORD=";
+    const content = `${prefix}${secret}\nDEBUG=1\nEND\n`;
+    const secretStart = content.indexOf(secret);
+    const secretEnd = secretStart + secret.length;
+
+    // A pool of adversarial and benign old_strings.
+    const oldPool = [
+      secret.slice(0, 3), // fragment: only inside the secret
+      secret.slice(-3), // tail fragment: only inside the secret
+      secret[0], // single char inside the secret
+      `${prefix}${secret.slice(0, 4)}`, // crosses the secret's start boundary
+      `${prefix}${secret}`, // wholly contains the secret (rotation)
+      `${prefix}[REDACTED]`, // hinted: resolves to a rewrite covering the secret
+      "DEBUG=1", // visible, disjoint from the secret
+      "END", // visible, disjoint
+      secret.slice(0, 2).repeat(1) + secret[0], // self-overlap-ish
+    ];
+
+    let sawRewrite = 0;
+    let sawDeny = 0;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...oldPool),
+        fc.constantFrom("", "X", "\n-", "replaced"),
+        fc.boolean(),
+        async (oldS, newS, replaceAll) => {
+          if (oldS.length === 0) return;
+          const result = await rehydrateRedacted(
+            "Edit",
+            {
+              file_path: "/f",
+              old_string: oldS,
+              new_string: newS,
+              replace_all: replaceAll,
+            },
+            fakeIo(content),
+          );
+          if (result === null) return;
+          if ("deny" in result) {
+            sawDeny++;
+            return;
+          }
+          sawRewrite++;
+          const updatedOld = result.updatedInput.old_string;
+          // The model's old_string must wholly cover any part of the secret the
+          // rewrite touches — otherwise it would splice hidden bytes.
+          for (const at of occ(content, updatedOld)) {
+            const end = at + updatedOld.length;
+            const overlaps = at < secretEnd && secretStart < end;
+            if (overlaps)
+              assert.ok(
+                at <= secretStart && secretEnd <= end,
+                `rewrite splices partially inside the secret span: ` +
+                  `old=${JSON.stringify(oldS)} disk=${JSON.stringify(updatedOld)}`,
+              );
+          }
+          // And re-sanitizing the applied edit must not newly reveal the secret.
+          if (!replaceAll && occ(content, updatedOld).length === 1) {
+            const newDisk = content.replace(
+              updatedOld,
+              result.updatedInput.new_string,
+            );
+            const before = new Set(exposedInView(content).map((s) => s.value));
+            for (const s of exposedInView(newDisk))
+              assert.ok(before.has(s.value), "secret exposed by the rewrite");
+          }
+        },
+      ),
+      runOptions,
+    );
+    // Both branches must actually be exercised or the invariant is vacuous.
+    assert.ok(sawDeny > 0, "no deny ever exercised — invariant vacuous");
+    assert.ok(sawRewrite > 0, "no rewrite ever exercised — invariant vacuous");
   });
 });
