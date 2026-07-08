@@ -96,6 +96,11 @@ jobs:
 
       - name: Setup base environment
         uses: ./.github/actions/setup-base-env
+        # Stryker's dry run executes the whole suite, including the rehydrate
+        # property test that drives the real Python redactor, so every shard
+        # needs uv + the Python deps.
+        with:
+          setup-python: "true"
 
       # Restore this shard's incremental result file so only mutants whose source
       # or covering tests changed since the last run are re-evaluated; the rest
