@@ -1092,6 +1092,20 @@ describe("stripInvisible: blank-filler carve-out", () => {
     assert.equal(cleaned, cp(0xac00) + cp(0xac01));
     assert.deepEqual(found, [CATEGORY.BLANK_FILLERS]);
   });
+
+  it("a blank filler between two joiners does not hide the joiner run (idempotent)", () => {
+    // م ZWJ <blank> ZWJ م — the blank is payload; stripping it makes the two
+    // joiners adjacent. The joiner-run must be detected in a SINGLE pass (both
+    // joiners stripped) so a second pass changes nothing. effectiveNeighbor
+    // steps over the removable blank to see the run up front.
+    for (const blank of [cp(0x2800), cp(0x115f), cp(0x3164)]) {
+      const joiner = cp(0x200d);
+      const input = cp(0x645) + joiner + blank + joiner + cp(0x645);
+      const once = stripInvisible(input);
+      assert.equal(once, cp(0x645) + cp(0x645), JSON.stringify(input));
+      assert.equal(stripInvisible(once), once);
+    }
+  });
 });
 
 // ─── Interior BOM after an ANSI strip (applyLayer1, L4) ───────────────────────
