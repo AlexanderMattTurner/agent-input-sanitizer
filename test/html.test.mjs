@@ -232,6 +232,7 @@ const HIDDEN_STYLE_CASES = [
   // ── per-declaration salvage on parse failure ──
   ["x;display:none", true], // one invalid decl must not blank the whole style (bypass fix)
   ["display:none;x", true], // invalid decl trailing the valid one is salvaged too
+  ["x;;display:none", true], // empty segment from `;;` is skipped, rest salvaged
   ["bad!!!;color:red", false], // salvage must not manufacture a false positive
   ["bad!!!;x also bad", false], // no declaration salvages at all — fails open
   // ── CSS-escaped keyword decoding ──
