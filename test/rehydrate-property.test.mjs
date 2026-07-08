@@ -45,7 +45,15 @@ function mkView(cleaned, secrets) {
   const pairs = [];
   for (const { index, value, placeholder } of hits) {
     text += cleaned.slice(last, index);
-    pairs.push({ placeholder, original: value, start: text.length });
+    // The real redactor's map mode emits CODE-POINT offsets (Python indexes by
+    // code point); rehydrate normalizes them to UTF-16 via pairsToUtf16. Emit
+    // the same code-point offset here — identical to text.length for BMP text,
+    // but correct when an astral char precedes the placeholder.
+    pairs.push({
+      placeholder,
+      original: value,
+      start: Array.from(text).length,
+    });
     text += placeholder;
     last = index + value.length;
   }
@@ -61,6 +69,7 @@ const runOptions = fcRunOptions({
   examples: REGRESSION_EXAMPLES,
 });
 
+const KEY = String.fromCodePoint(0x1f511); // 🔑 astral (2 UTF-16 units)
 const lineArb = fc.constantFrom(
   "alpha beta gamma",
   "x = compute(y)",
@@ -69,6 +78,11 @@ const lineArb = fc.constantFrom(
   `PASSWORD=${SECRET_A}`,
   `API_KEY=${SECRET_B}`,
   `TOKEN=${SECRET_A}`,
+  // Astral chars before a secret make the placeholder's code-point offset
+  // diverge from its UTF-16 offset, exercising rehydrate's pairsToUtf16
+  // normalization (a BMP-only corpus never reaches that shift).
+  `${KEY} PASSWORD=${SECRET_A}`,
+  `${KEY}${KEY} TOKEN=${SECRET_B}`,
 );
 const strippableArb = fc.constantFrom(ZW, `${ESC}[32m`, `${ESC}[0m`, ZW + ZW);
 
@@ -200,6 +214,40 @@ describe("rehydrate: properties", () => {
     assert.ok(
       sawRoundTrip > 0,
       "round-trip/no-exposure precondition never held — property passed vacuously",
+    );
+  });
+
+  it("re-anchors across an astral char before the secret (pairsToUtf16 integration)", async () => {
+    // Deterministic companion to the fuzz corpus: the placeholder sits after an
+    // astral char, so its code-point offset (what the redactor emits) is one
+    // less than its UTF-16 offset. A missing pairsToUtf16 normalization would
+    // mis-anchor the rewrite onto the wrong disk bytes. Proves the integration
+    // path the property test only reaches stochastically.
+    const content = `${KEY} PASSWORD=${SECRET_A}\nDEBUG=1\n`;
+    const view = modelView(content);
+    const oldS = view.split("\n")[0]; // "🔑 PASSWORD=[REDACTED]"
+    assert.ok(oldS.startsWith(KEY), "fixture must place the astral char first");
+
+    const result = await rehydrateRedacted(
+      "Edit",
+      { file_path: "/f", old_string: oldS, new_string: "REMOVED" },
+      fakeIo(content),
+    );
+
+    assert.ok(
+      result && result.updatedInput,
+      "expected a rewrite, not null/deny",
+    );
+    const updatedOld = result.updatedInput.old_string;
+    assert.ok(content.includes(updatedOld), "rewritten old_string not on disk");
+    assert.ok(
+      updatedOld.startsWith(KEY),
+      "rewrite anchored past the astral char — pairsToUtf16 shift was dropped",
+    );
+    assert.equal(
+      modelView(updatedOld),
+      oldS,
+      "rewritten old_string does not sanitize back to the model's input",
     );
   });
 
