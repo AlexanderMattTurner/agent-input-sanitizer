@@ -13,7 +13,7 @@
  *
  *   KEEP (must produce updatedInput anchored to exact disk bytes):
  *     - a redacted secret line edited via its placeholder,
- *     - a distinctly-placeholdered secret line,
+ *     - a distinctly-placeholdered (typed) secret line,
  *     - a line with an interior zero-width char (hint-free re-anchor),
  *     - an ANSI-colored line (boundary run preserved, interior run replaced);
  *   PASS-THROUGH (must return null, never a rewrite or deny):
@@ -25,103 +25,95 @@
  *     - replace_all across those distinct-secret twins,
  *     - a greedy-alignment collision (ANSI final "m" abutting kept "m"s).
  *
- * Every scenario is grounded in a deterministic case from rehydrate.test.mjs;
- * the fuzzing varies the surrounding document (ordering, neighbors, count) to
- * prove each verdict is decided by the construct itself, not by fixture shape.
+ * The redactor is NOT re-implemented here. Each construct's model-visible view
+ * is read back from the REAL Python engine (`agent_input_sanitizer.secrets`)
+ * over a long-lived worker — the single source of truth — so a placeholder the
+ * test edits against is exactly the one production redaction emits, never a
+ * hand-rolled stand-in that could drift on detection or offsets. The fuzzing
+ * varies the surrounding document (ordering, neighbors, count) to prove each
+ * verdict is decided by the construct itself, not by fixture shape.
+ *
+ * Every scenario is grounded in a deterministic case from rehydrate.test.mjs.
  */
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
 
 import { rehydrateRedacted } from "../src/rehydrate.mjs";
+import { applyLayer1 } from "../src/layer1.mjs";
 import { occurrences } from "../src/view-map.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
+import {
+  realRedactMap,
+  realRedact,
+  stopRealRedactor,
+} from "./real-redactor.mjs";
 
-const PH = "[REDACTED]";
-const PH_PEM = "[REDACTED: Private Key]";
 const ZW = cp(0x200b);
 const ESC = cp(0x1b);
 const GREEN = `${ESC}[32m`;
 const RESET = `${ESC}[0m`;
 
-// Assembled at runtime so no complete token literal trips push protection.
-// The trailing "q" keeps values prefix-free across indices (…z1q vs …z12q).
-const secretFor = (i) => ["hunter2hunter2", `hunter2z${i}q`].join("");
+// Tear the shared redactor worker down once the file's tests finish.
+after(stopRealRedactor);
 
-/** Build a redactMap view from cleaned text (same shape the unit tests use). */
-function mkView(cleaned, secrets) {
-  const hits = [];
-  for (const { value, placeholder } of secrets)
-    for (const index of occurrences(cleaned, value))
-      hits.push({ index, value, placeholder });
-  hits.sort((a, b) => a.index - b.index);
-  let text = "";
-  let last = 0;
-  const pairs = [];
-  for (const { index, value, placeholder } of hits) {
-    text += cleaned.slice(last, index);
-    pairs.push({ placeholder, original: value, start: text.length });
-    text += placeholder;
-    last = index + value.length;
-  }
-  text += cleaned.slice(last);
-  return { text, pairs };
+// io backed by the real Python redactor — the single source of truth. rehydrate
+// Layer-1-cleans `content` internally, then calls redactMap on the cleaned text.
+const realIo = (content) => ({
+  readFile: () => content,
+  redactMap: (text) => realRedactMap(text),
+  redact: (text) => realRedact(text),
+});
+
+/** The model-visible view of `content`: Layer 1 (JS) then the real redactor —
+ * exactly what rehydrate sees when it calls the injected io on cleaned bytes. */
+async function modelView(content) {
+  const { cleaned } = applyLayer1(content);
+  const view = await realRedactMap(cleaned);
+  return view.text;
 }
 
+// Distinct, prefix-free secret values per piece. Assembled at runtime so no
+// complete token literal trips push protection; the trailing "q" keeps values
+// prefix-free across indices (…z1q vs …z12q).
+const secretFor = (i) => ["hunter2hunter2", `hunter2z${i}q`].join("");
+// High-entropy value that trips the keyword+entropy detector to a *typed*
+// placeholder ([REDACTED: Secret Keyword]), distinct from the bare [REDACTED]
+// a named field emits — so a document can carry two different placeholders.
+const entropyFor = (i) => ["Zx91mKp4vNqR8", `tLw2sYb7cH${i}dFj3aUe`].join("");
+
 /**
- * A labeled construct at document position `i`. Each returns the disk line(s),
- * the model-visible view line(s), and per-construct expectations. Index tags
- * make every KEEP construct's view line unique within the document.
+ * A labeled construct at document position `i`. Each returns the disk line(s)
+ * it contributes; the model-visible view line(s) are read back from the real
+ * engine at assert time. Index tags make every construct's view line unique.
  */
 const PIECES = {
-  // Redacted secret line: placeholder edit must rehydrate to the real value.
-  secret: (i) => ({
-    disk: `KEY${i}=${secretFor(i)}`,
-    viewLine: `KEY${i}=${PH}`,
-    secrets: [{ value: secretFor(i), placeholder: PH }],
-  }),
-  // Same, under a distinct placeholder text (exercises multi-placeholder docs).
-  pem: (i) => ({
-    disk: `CERT${i}=${secretFor(i)}`,
-    viewLine: `CERT${i}=${PH_PEM}`,
-    secrets: [{ value: secretFor(i), placeholder: PH_PEM }],
-  }),
+  // Named-field secret: the value after PASSWORD= redacts to a bare [REDACTED];
+  // a placeholder edit must rehydrate to the real on-disk value.
+  secret: (i) => ({ disk: [`L${i} PASSWORD=${secretFor(i)}`] }),
+  // Keyword+entropy secret: redacts to a *typed* placeholder, so docs mixing
+  // this with `secret` carry two distinct placeholder texts.
+  typed: (i) => ({ disk: [`M${i} secret = "${entropyFor(i)}"`] }),
   // Interior zero-width char: hint-free edit must re-attach the stripped byte.
-  zw: (i) => ({
-    disk: `fn${i}(a${ZW}, b);`,
-    viewLine: `fn${i}(a, b);`,
-    secrets: [],
-  }),
+  zw: (i) => ({ disk: [`fn${i}(a${ZW}, b);`] }),
   // ANSI color: leading run is a boundary (preserved), reset is interior.
   ansi: (i) => ({
-    disk: `${GREEN}log${i}${RESET} ok`,
-    viewLine: `log${i} ok`,
+    disk: [`${GREEN}log${i}${RESET} ok`],
     diskAnchor: `log${i}${RESET} ok`, // leading GREEN stays outside the span
-    secrets: [],
   }),
   // Plain line: bytes match disk verbatim, layer must not touch the edit.
-  plain: (i) => ({
-    disk: `plain line ${i} text`,
-    viewLine: `plain line ${i} text`,
-    secrets: [],
-  }),
-  // Greedy-alignment collision: the ANSI sequence's final "m" abuts kept
-  // "m"s, so the deleted run's placement is ambiguous. Editing across it must
-  // be denied, not anchored to a guessed run boundary (pinned deterministic
-  // case: "denies when greedy alignment cannot re-anchor unambiguously").
-  collide: (i) => ({
-    disk: `C${i} m${GREEN}mm`,
-    viewLine: `C${i} mmm`,
-    secrets: [],
-  }),
-  // Two view-identical lines hiding DISTINCT secrets: any edit addressed by
-  // the shared view text is ambiguous and must be denied, never guessed.
+  plain: (i) => ({ disk: [`plain line ${i} text`] }),
+  // Greedy-alignment collision: the ANSI sequence's final "m" abuts kept "m"s,
+  // so the deleted run's placement is ambiguous. Editing across it must be
+  // denied, not anchored to a guessed run boundary.
+  collide: (i) => ({ disk: [`C${i} m${GREEN}mm`] }),
+  // Two view-identical lines hiding DISTINCT secrets: both named-field values
+  // redact to the SAME [REDACTED], so any edit addressed by the shared view
+  // text is ambiguous and must be denied, never guessed.
   dupPair: (i) => ({
-    disk: `DUP${i}=${secretFor(i)}A\nDUP${i}=${secretFor(i)}B`,
-    viewLine: `DUP${i}=${PH}`,
-    secrets: [
-      { value: `${secretFor(i)}A`, placeholder: PH },
-      { value: `${secretFor(i)}B`, placeholder: PH },
+    disk: [
+      `DUP${i}=PASSWORD=${secretFor(i)}A`,
+      `DUP${i}=PASSWORD=${secretFor(i)}B`,
     ],
   }),
 };
@@ -130,23 +122,29 @@ const kindGen = fc.constantFrom(...Object.keys(PIECES));
 const docGen = fc
   .array(kindGen, { minLength: 1, maxLength: 8 })
   .map((kinds) => {
-    const pieces = kinds.map((kind, i) => ({ kind, ...PIECES[kind](i) }));
-    const content = `${pieces.map((p) => p.disk).join("\n")}\n`;
-    const secrets = pieces.flatMap((p) => p.secrets);
-    return { pieces, content, secrets };
+    let cursor = 0;
+    const pieces = kinds.map((kind, i) => {
+      const spec = PIECES[kind](i);
+      const piece = {
+        kind,
+        i,
+        lineStart: cursor,
+        nLines: spec.disk.length,
+        ...spec,
+      };
+      cursor += spec.disk.length;
+      return piece;
+    });
+    const diskLines = pieces.flatMap((p) => p.disk);
+    const content = `${diskLines.join("\n")}\n`;
+    return { pieces, content, diskLines };
   });
 
-const ioFor = ({ content, secrets }) => ({
-  readFile: () => content,
-  redactMap: (cleaned) => mkView(cleaned, secrets),
-  redact: (text) => mkView(text, secrets).text,
-});
-
-const editCall = (doc, old_string, new_string, extra = {}) =>
+const editCall = (content, old_string, new_string, extra = {}) =>
   rehydrateRedacted(
     "Edit",
     { file_path: "/f", old_string, new_string, ...extra },
-    ioFor(doc),
+    realIo(content),
   );
 
 /** Assert an exact translation: rewritten to precisely these disk bytes. */
@@ -167,75 +165,108 @@ describe("semantic-correctness fuzz: rehydrate precision on mixed documents", ()
   it("each construct's edit gets its exact verdict regardless of neighbors", async () => {
     await fc.assert(
       fc.asyncProperty(docGen, async (doc) => {
-        for (const [i, p] of doc.pieces.entries()) {
-          if (p.kind === "secret" || p.kind === "pem") {
+        // Read the whole document's view back from the real engine ONCE, then
+        // address each construct's edit by the exact line(s) the engine emits.
+        const viewLines = (await modelView(doc.content)).split("\n");
+        // Layer 1 + redaction rewrite spans in place; neither adds nor drops
+        // lines, so view lines map 1:1 to disk lines (+1 trailing empty).
+        assert.equal(
+          viewLines.length,
+          doc.diskLines.length + 1,
+          "view/disk line count diverged — positional mapping broke",
+        );
+
+        for (const p of doc.pieces) {
+          const view = viewLines[p.lineStart];
+          const disk = doc.diskLines[p.lineStart];
+
+          if (p.kind === "secret" || p.kind === "typed") {
+            // The engine must actually have redacted this line (precondition
+            // for the placeholder-anchoring assertions below — never vacuous).
+            assert.ok(
+              view.includes("[REDACTED") && view !== disk,
+              `${p.kind}#${p.i}: expected a redacted view, got ${JSON.stringify(view)}`,
+            );
             // KEEP: placeholder edit rehydrates to the exact on-disk secret.
             assertKeep(
-              await editCall(doc, p.viewLine, `${p.viewLine} # rotated`),
-              p.disk,
-              `${p.disk} # rotated`,
-              `${p.kind}#${i} rotate`,
+              await editCall(doc.content, view, `${view} # rotated`),
+              disk,
+              `${disk} # rotated`,
+              `${p.kind}#${p.i} rotate`,
             );
             // KEEP: whole-line deletion anchors to the exact secret bytes.
             assertKeep(
-              await editCall(doc, `${p.viewLine}\n`, ""),
-              `${p.disk}\n`,
+              await editCall(doc.content, `${view}\n`, ""),
+              `${disk}\n`,
               "",
-              `${p.kind}#${i} delete`,
+              `${p.kind}#${p.i} delete`,
             );
             // DENY: an old_string cut mid-placeholder must never be guessed.
-            const [prefix] = p.viewLine.split("]");
+            const [prefix] = view.split("]");
             assertDeny(
-              await editCall(doc, prefix, "x"),
+              await editCall(doc.content, prefix, "x"),
               /include each placeholder whole/,
-              `${p.kind}#${i} mid-placeholder`,
+              `${p.kind}#${p.i} mid-placeholder`,
             );
           } else if (p.kind === "zw") {
             // KEEP: hint-free edit re-attaches the interior stripped byte.
             assertKeep(
-              await editCall(doc, p.viewLine, `fn${i}(a, b, c);`),
-              p.disk,
-              `fn${i}(a, b, c);`,
-              `zw#${i}`,
+              await editCall(doc.content, view, `fn${p.i}(a, b, c);`),
+              disk,
+              `fn${p.i}(a, b, c);`,
+              `zw#${p.i}`,
             );
           } else if (p.kind === "ansi") {
             // KEEP: interior reset replaced with the span, leading run kept.
             assertKeep(
-              await editCall(doc, p.viewLine, `log${i} EDITED`),
+              await editCall(doc.content, view, `log${p.i} EDITED`),
               p.diskAnchor,
-              `log${i} EDITED`,
-              `ansi#${i}`,
+              `log${p.i} EDITED`,
+              `ansi#${p.i}`,
             );
           } else if (p.kind === "collide") {
             // DENY: greedy alignment cannot place the deleted run; anchoring
             // anyway could splice the edit across the wrong bytes.
             assertDeny(
-              await editCall(doc, p.viewLine, `C${i} nnn`),
+              await editCall(doc.content, view, `C${p.i} nnn`),
               /cannot be\s+re-anchored unambiguously/,
-              `collide#${i}`,
+              `collide#${p.i}`,
             );
           } else if (p.kind === "plain") {
             // PASS-THROUGH: verbatim disk bytes need no translation; a rewrite
             // or deny here would corrupt/block a perfectly ordinary edit.
+            assert.equal(view, disk, `plain#${p.i}: view must equal disk`);
             assert.equal(
-              await editCall(doc, p.viewLine, `edited ${i}`),
+              await editCall(doc.content, view, `edited ${p.i}`),
               null,
-              `plain#${i}`,
+              `plain#${p.i}`,
             );
           } else {
-            // dupPair — DENY both ways: the shared view text hides distinct
-            // secrets, so single-target and replace_all edits are ambiguous.
-            assertDeny(
-              await editCall(doc, p.viewLine, `${p.viewLine}x`),
-              /matches 2 locations/,
-              `dupPair#${i}`,
+            // dupPair — the two lines must render to the IDENTICAL view text
+            // (distinct secrets, same [REDACTED]); assert that ambiguity holds,
+            // then DENY both ways: single-target and replace_all are ambiguous.
+            const twin = viewLines[p.lineStart + 1];
+            assert.equal(
+              view,
+              twin,
+              `dupPair#${p.i}: twins must share one view text (the ambiguity)`,
+            );
+            assert.equal(
+              occurrences(viewLines.join("\n"), view).length,
+              2,
+              `dupPair#${p.i}: shared view text must occur exactly twice`,
             );
             assertDeny(
-              await editCall(doc, p.viewLine, `${p.viewLine}x`, {
+              await editCall(doc.content, view, `${view}x`),
+              /matches 2 locations/,
+              `dupPair#${p.i}`,
+            );
+            assertDeny(
+              await editCall(doc.content, view, `${view}x`, {
                 replace_all: true,
               }),
               /on-disk bytes differ/,
-              `dupPair#${i} replace_all`,
+              `dupPair#${p.i} replace_all`,
             );
           }
         }
@@ -244,17 +275,20 @@ describe("semantic-correctness fuzz: rehydrate precision on mixed documents", ()
         // refused (writing it literally would persist placeholder text; guessing
         // would splice a secret the model never matched).
         const inSpan = doc.pieces.find((p) => p.kind === "secret");
-        const outside = doc.pieces.find((p) => p.kind === "pem");
-        if (inSpan && outside)
+        const outside = doc.pieces.find((p) => p.kind === "typed");
+        if (inSpan && outside) {
+          const inView = viewLines[inSpan.lineStart];
+          const outView = viewLines[outside.lineStart];
           assertDeny(
             await editCall(
-              doc,
-              inSpan.viewLine,
-              `${inSpan.viewLine}\nCOPY=${outside.viewLine.split("=")[1]}`,
+              doc.content,
+              inView,
+              `${inView}\nCOPY=${outView.split("=").slice(1).join("=")}`,
             ),
             /outside\s+the matched old_string/,
             "outside-span placeholder",
           );
+        }
       }),
       fcRunOptions({ numRuns: 150 }),
     );
