@@ -1,23 +1,23 @@
 {
   "splitEvery": 300,
-  "split": [{ "id": "html", "file": "src/html.mjs" }],
+  "split": [
+    { "id": "html", "file": "src/html.mjs" },
+    { "id": "standardized-variants", "file": "src/standardized-variants.mjs" },
+    { "id": "invisible", "file": "src/invisible.mjs" },
+    { "id": "output", "file": "src/output.mjs" },
+    { "id": "joining-type", "file": "src/joining-type.mjs" },
+    { "id": "rehydrate", "file": "src/rehydrate.mjs" },
+    { "id": "instructions", "file": "src/instructions.mjs" },
+    { "id": "view-map", "file": "src/view-map.mjs" }
+  ],
   "groups": [
-    { "id": "output", "mutate": "src/output.mjs" },
-    { "id": "rehydrate", "mutate": "src/rehydrate.mjs" },
-    { "id": "invisible-index", "mutate": "src/invisible.mjs,src/index.mjs" },
-    {
-      "id": "instructions-gates",
-      "mutate": "src/instructions.mjs,src/gates.mjs"
-    },
-    { "id": "viewmap-prompt", "mutate": "src/view-map.mjs,src/prompt.mjs" },
     {
       "id": "confusables-layer1",
       "mutate": "src/confusables.mjs,src/layer1.mjs"
     },
-    { "id": "joining-type", "mutate": "src/joining-type.mjs" },
     {
-      "id": "standardized-variants",
-      "mutate": "src/standardized-variants.mjs"
+      "id": "index-prompt-gates",
+      "mutate": "src/index.mjs,src/prompt.mjs,src/gates.mjs"
     }
   ]
 }
