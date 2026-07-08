@@ -29,6 +29,11 @@ const FOLD_MAP = {
   [cp(0x0441)]: "c", // Cyrillic с
   [cp(0x1d400)]: "a", // 𝐀 mathematical bold A (astral)
   [cp(0x1d401)]: "b", // 𝐁 (astral)
+  // Length-INCREASING folds (1 glyph → 2 ASCII): a real engine maps ﬁ→"fi",
+  // ĳ→"ij". The old map had only 1→1 / 2→1 folds, so the highest-index-first
+  // splice was never exercised against a growing replacement.
+  [cp(0xfb01)]: "fi", // ﬁ LATIN SMALL LIGATURE FI
+  [cp(0x0133)]: "ij", // ĳ LATIN SMALL LIGATURE IJ
 };
 
 /** Deterministic confusable scanner over FOLD_MAP, iterating by code point. */
@@ -67,6 +72,8 @@ const charCp = fc.constantFrom(
   0x0441,
   0x1d400,
   0x1d401,
+  0xfb01, // ﬁ (1→2 fold)
+  0x0133, // ĳ (1→2 fold)
   0x61, // a
   0x2f, // /
   0x2e, // .
@@ -102,7 +109,9 @@ describe("foldConfusables (property)", () => {
       // Strip all confusable glyphs from input and their ASCII canon from
       // output: the remaining code-point sequences must be identical.
       const flagged = new Set(Object.keys(FOLD_MAP));
-      const canon = new Set(Object.values(FOLD_MAP));
+      // FOLD_MAP values may be multi-char ("fi", "ij"); split into their
+      // constituent code points so the canon set is per-character.
+      const canon = new Set(Object.values(FOLD_MAP).flatMap((v) => [...v]));
       const inputRest = [...t].filter((ch) => !flagged.has(ch)).join("");
       const outputRest = [...folded].filter((ch) => !canon.has(ch)).join("");
       // inputRest may still contain "a" (ASCII anchor) which is also a canon

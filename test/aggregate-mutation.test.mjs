@@ -1,0 +1,130 @@
+/**
+ * Unit test for the shard-report aggregator's dedup/tally.
+ *
+ * The big source files are sharded by LINE RANGE, so a mutant whose span
+ * straddles a tile boundary is instrumented by BOTH adjacent shards; the
+ * per-shard incremental cache can likewise re-emit a mutant from an earlier
+ * tiling. Either way the SAME mutant lands in more than one `mutation.json`.
+ * Summing the raw statuses double-counts it — and because the neighbour shard
+ * only clips the mutant's edge, its copy frequently reports NoCoverage/Survived,
+ * deflating the project score below the true unsharded value. `tallyMutants`
+ * collapses duplicates to one verdict per unique mutant, keeping the strongest.
+ *
+ * These tests pin that behaviour with hand-built reports; the end-to-end score
+ * over the real 28 shard reports is exercised by running the script in CI.
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import { tallyMutants } from "../.github/scripts/aggregate-mutation.mjs";
+
+/** Build a mutant with a distinct-by-default location so tests opt IN to
+ * collisions by passing the same `loc`, rather than colliding by accident. */
+let seq = 0;
+const mutant = (status, loc) => {
+  const line = loc ?? ++seq;
+  return {
+    status,
+    mutatorName: "ArithmeticOperator",
+    replacement: "-",
+    location: {
+      start: { line, column: 1 },
+      end: { line, column: 9 },
+    },
+  };
+};
+
+/** One shard report: { files: { path: { mutants: [...] } } }. */
+const report = (...mutants) => ({ files: { "src/a.mjs": { mutants } } });
+
+describe("tallyMutants", () => {
+  it("scores a single report exactly as Stryker would (detected / covered)", () => {
+    const r = report(
+      mutant("Killed"),
+      mutant("Timeout"),
+      mutant("Survived"),
+      mutant("NoCoverage"),
+      mutant("RuntimeError"), // excluded from the score entirely
+      mutant("Ignored"), // excluded from the score entirely
+    );
+    const { total, detected, undetected, score, counts } = tallyMutants([r]);
+    assert.equal(total, 6);
+    assert.equal(detected, 2); // Killed + Timeout
+    assert.equal(undetected, 2); // Survived + NoCoverage
+    // 2 detected / 4 scored = 50%; RuntimeError + Ignored are not scored.
+    assert.equal(score, 50);
+    assert.deepEqual(counts, {
+      Killed: 1,
+      Timeout: 1,
+      Survived: 1,
+      NoCoverage: 1,
+      RuntimeError: 1,
+      Ignored: 1,
+    });
+  });
+
+  it("counts a mutant instrumented by two shards once, keeping the strongest verdict", () => {
+    // Same identity (same loc/mutator/replacement) in two shard reports: the
+    // owning shard Killed it; the neighbour that only clipped its span reports
+    // NoCoverage. It must count once, as Killed — the raw sum would score it as
+    // 1 detected + 1 undetected = 50%, the bug this dedup fixes.
+    const shardA = report(mutant("Killed", 42));
+    const shardB = report(mutant("NoCoverage", 42));
+    const { total, detected, undetected, score, counts } = tallyMutants([
+      shardA,
+      shardB,
+    ]);
+    assert.equal(total, 1, "the duplicated mutant must collapse to one");
+    assert.equal(detected, 1);
+    assert.equal(undetected, 0);
+    assert.equal(score, 100);
+    assert.deepEqual(counts, { Killed: 1 });
+  });
+
+  it("keeps the strongest verdict regardless of shard order", () => {
+    // Weaker verdict seen FIRST must still lose to the later stronger one, and
+    // vice versa — the resolution is order-independent, not last-write-wins.
+    const strongFirst = tallyMutants([
+      report(mutant("Survived", 7)),
+      report(mutant("Killed", 7)),
+    ]);
+    const strongLast = tallyMutants([
+      report(mutant("Killed", 7)),
+      report(mutant("Survived", 7)),
+    ]);
+    assert.deepEqual(strongFirst.counts, { Killed: 1 });
+    assert.deepEqual(strongLast.counts, { Killed: 1 });
+  });
+
+  it("resolves Survived over NoCoverage for the same mutant (covered beats unreached)", () => {
+    // Both undetected, but Survived means the suite RAN the mutant and missed
+    // it (a real gap) while NoCoverage means a neighbour never reached it. The
+    // owning shard's Survived is the true verdict.
+    const { counts, undetected, score } = tallyMutants([
+      report(mutant("NoCoverage", 3)),
+      report(mutant("Survived", 3)),
+    ]);
+    assert.deepEqual(counts, { Survived: 1 });
+    assert.equal(undetected, 1);
+    assert.equal(score, 0);
+  });
+
+  it("treats mutants at different locations as distinct (no false collapse)", () => {
+    // Guard against the dedup over-merging: same status/mutator but different
+    // lines are different mutants and must both count.
+    const { total } = tallyMutants([
+      report(mutant("Survived", 10), mutant("Survived", 20)),
+    ]);
+    assert.equal(total, 2);
+  });
+
+  it("scores 0 when no mutant produced a scorable verdict", () => {
+    // Only errored/ignored mutants: scored denominator is 0, guard the div.
+    const { score, detected, undetected } = tallyMutants([
+      report(mutant("RuntimeError"), mutant("Ignored")),
+    ]);
+    assert.equal(detected, 0);
+    assert.equal(undetected, 0);
+    assert.equal(score, 0);
+  });
+});

@@ -15,42 +15,58 @@
  *   5. NO EXPOSURE: a successful rewrite never puts a candidate secret into a
  *      form the next view would reveal.
  *   6. A deny always carries a non-empty reason and no updatedInput.
+ *
+ * The redactor is NOT re-implemented here. `io.redactMap`/`io.redact` are driven
+ * by the REAL Python engine (`agent_input_sanitizer.secrets.redact_map`) over a
+ * long-lived worker — the single source of truth — so the view these invariants
+ * anchor against is exactly what production redaction produces, offsets and all.
  */
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
 import { rehydrateRedacted } from "../src/rehydrate.mjs";
 import { applyLayer1 } from "../src/layer1.mjs";
 import { occurrences as occ } from "../src/view-map.mjs";
 import { fcRunOptions } from "./test-helpers.mjs";
+import {
+  realRedactMap,
+  realRedact,
+  stopRealRedactor,
+} from "./real-redactor.mjs";
 
+// Secrets the corpus plants after named fields (PASSWORD=/API_KEY=/TOKEN=). The
+// real engine flags each as a "named secret field" and redacts it to an
+// identical [REDACTED], so the test never re-implements redaction.
 const SECRET_A = ["hunter2hunter2", "hunter2xA"].join("");
 const SECRET_B = ["hunter2hunter2", "hunter2xB"].join("");
-const SECRETS = [
-  { value: SECRET_A, placeholder: "[REDACTED]" },
-  { value: SECRET_B, placeholder: "[REDACTED]" },
-];
+const SECRET_VALUES = [SECRET_A, SECRET_B];
 const ZW = String.fromCharCode(0x200b);
 const ESC = String.fromCharCode(0x1b);
 
-/** Build a redactMap view from cleaned text by replacing each secret. */
-function mkView(cleaned, secrets) {
-  const hits = [];
-  for (const { value, placeholder } of secrets)
-    for (const index of occ(cleaned, value))
-      hits.push({ index, value, placeholder });
-  hits.sort((a, b) => a.index - b.index);
-  let text = "";
-  let last = 0;
-  const pairs = [];
-  for (const { index, value, placeholder } of hits) {
-    text += cleaned.slice(last, index);
-    pairs.push({ placeholder, original: value, start: text.length });
-    text += placeholder;
-    last = index + value.length;
-  }
-  text += cleaned.slice(last);
-  return { text, pairs };
+// Tear the shared redactor worker down once the file's tests finish.
+after(stopRealRedactor);
+
+// io backed by the real Python redactor — the single source of truth. redactMap
+// runs the engine's map mode; redact is the plain "any secrets?" probe (null
+// when clean). readFile returns the planted disk bytes.
+const realIo = (content) => ({
+  readFile: () => content,
+  redactMap: (text) => realRedactMap(text),
+  redact: (text) => realRedact(text),
+});
+
+/** Sanitized view of `disk` exactly as the model would read it: Layer 1 (JS),
+ * then the real redactor. Async — it awaits the engine. */
+async function modelView(disk) {
+  const { cleaned } = applyLayer1(disk);
+  const view = await realRedactMap(cleaned);
+  return view.text;
+}
+
+/** The planted secret values the next view of `disk` would reveal. */
+async function exposedInView(disk) {
+  const view = await modelView(disk);
+  return SECRET_VALUES.filter((v) => view.includes(v));
 }
 
 // Counterexamples this property has caught, pinned so they replay on EVERY run.
@@ -61,6 +77,7 @@ const runOptions = fcRunOptions({
   examples: REGRESSION_EXAMPLES,
 });
 
+const KEY = String.fromCodePoint(0x1f511); // 🔑 astral (2 UTF-16 units)
 const lineArb = fc.constantFrom(
   "alpha beta gamma",
   "x = compute(y)",
@@ -69,6 +86,11 @@ const lineArb = fc.constantFrom(
   `PASSWORD=${SECRET_A}`,
   `API_KEY=${SECRET_B}`,
   `TOKEN=${SECRET_A}`,
+  // Astral chars before a secret make the placeholder's code-point offset
+  // diverge from its UTF-16 offset, exercising rehydrate's pairsToUtf16
+  // normalization (a BMP-only corpus never reaches that shift).
+  `${KEY} PASSWORD=${SECRET_A}`,
+  `${KEY}${KEY} TOKEN=${SECRET_B}`,
 );
 const strippableArb = fc.constantFrom(ZW, `${ESC}[32m`, `${ESC}[0m`, ZW + ZW);
 
@@ -87,24 +109,6 @@ const contentArb = fc
     }
     return content;
   });
-
-const fakeIo = (content) => ({
-  readFile: () => content,
-  redactMap: (text) => mkView(text, SECRETS),
-  redact: (text) => mkView(text, SECRETS).text,
-});
-
-/** Sanitized view of `disk` exactly as the model would read it. */
-function modelView(disk) {
-  const { cleaned } = applyLayer1(disk);
-  return mkView(cleaned, SECRETS).text;
-}
-
-/** The secrets the next view of `disk` would reveal (candidate exposure). */
-function exposedInView(disk) {
-  const view = modelView(disk);
-  return SECRETS.filter((s) => view.includes(s.value));
-}
 
 /** Pick a whole-line span of the view as old_string. */
 function pickSpan(view, startSeed, lenSeed) {
@@ -128,7 +132,7 @@ describe("rehydrate: properties", () => {
         fc.nat(),
         fc.constantFrom("delete", "append", "replace"),
         async (content, startSeed, lenSeed, mode) => {
-          const view = modelView(content);
+          const view = await modelView(content);
           const oldS = pickSpan(view, startSeed, lenSeed);
           if (oldS.length === 0) return;
           const replacements = {
@@ -141,7 +145,7 @@ describe("rehydrate: properties", () => {
           const result = await rehydrateRedacted(
             "Edit",
             { file_path: "/f", old_string: oldS, new_string: newS },
-            fakeIo(content),
+            realIo(content),
           );
 
           if (result === null) {
@@ -164,7 +168,7 @@ describe("rehydrate: properties", () => {
           // Invariant 1: anchored to real disk bytes whose view is the input.
           assert.ok(content.includes(updatedOld), "old_string not on disk");
           assert.equal(
-            modelView(updatedOld),
+            await modelView(updatedOld),
             oldS,
             "rewritten old_string does not sanitize back to the model's input",
           );
@@ -181,15 +185,15 @@ describe("rehydrate: properties", () => {
               result.updatedInput.new_string,
             );
             assert.equal(
-              modelView(newDisk),
-              modelView(view.replace(oldS, newS)),
+              await modelView(newDisk),
+              await modelView(view.replace(oldS, newS)),
               "post-edit view differs from the model's intended edit",
             );
             // No secret newly revealed by the rewrite.
-            const before = new Set(exposedInView(content).map((s) => s.value));
-            for (const s of exposedInView(newDisk))
+            const before = new Set(await exposedInView(content));
+            for (const v of await exposedInView(newDisk))
               assert.ok(
-                before.has(s.value),
+                before.has(v),
                 "a secret became visible after the rewrite",
               );
           }
@@ -203,7 +207,50 @@ describe("rehydrate: properties", () => {
     );
   });
 
+  it("re-anchors across an astral char before the secret (pairsToUtf16 integration)", async () => {
+    // Deterministic companion to the fuzz corpus: the placeholder sits after an
+    // astral char, so its code-point offset (what the redactor emits) is one
+    // less than its UTF-16 offset. A missing pairsToUtf16 normalization would
+    // mis-anchor the rewrite onto the wrong disk bytes. Proves the integration
+    // path the property test only reaches stochastically.
+    const content = `${KEY} PASSWORD=${SECRET_A}\nDEBUG=1\n`;
+    const view = await modelView(content);
+    const oldS = view.split("\n")[0]; // "🔑 PASSWORD=[REDACTED]"
+    assert.ok(oldS.startsWith(KEY), "fixture must place the astral char first");
+
+    const result = await rehydrateRedacted(
+      "Edit",
+      { file_path: "/f", old_string: oldS, new_string: "REMOVED" },
+      realIo(content),
+    );
+
+    assert.ok(
+      result && result.updatedInput,
+      "expected a rewrite, not null/deny",
+    );
+    const updatedOld = result.updatedInput.old_string;
+    assert.ok(content.includes(updatedOld), "rewritten old_string not on disk");
+    assert.ok(
+      updatedOld.startsWith(KEY),
+      "rewrite anchored past the astral char — pairsToUtf16 shift was dropped",
+    );
+    assert.equal(
+      await modelView(updatedOld),
+      oldS,
+      "rewritten old_string does not sanitize back to the model's input",
+    );
+  });
+
   it("never throws for arbitrary string inputs given a well-formed io", async () => {
+    // Robustness of rehydrate over arbitrary TOOL INPUTS — not a redaction test.
+    // fast-check feeds lone surrogates here, which have no meaning to redaction;
+    // a minimal well-formed io (no secrets) is the right double, and it keeps the
+    // real engine's JSON bridge out of the lone-surrogate path.
+    const inertIo = (content) => ({
+      readFile: () => content,
+      redactMap: (text) => ({ text, pairs: [] }),
+      redact: () => null,
+    });
     await fc.assert(
       fc.asyncProperty(
         fc.string(),
@@ -211,7 +258,7 @@ describe("rehydrate: properties", () => {
         fc.string(),
         fc.constantFrom("Edit", "Write", "NotebookEdit", "Bash"),
         async (content, oldOrContent, newS, tool) => {
-          const io = fakeIo(content);
+          const io = inertIo(content);
           const inputs = {
             Edit: {
               file_path: "/f",
@@ -284,7 +331,7 @@ describe("rehydrate: properties", () => {
               new_string: newS,
               replace_all: replaceAll,
             },
-            fakeIo(content),
+            realIo(content),
           );
           if (result === null) return;
           if ("deny" in result) {
@@ -311,9 +358,9 @@ describe("rehydrate: properties", () => {
               updatedOld,
               result.updatedInput.new_string,
             );
-            const before = new Set(exposedInView(content).map((s) => s.value));
-            for (const s of exposedInView(newDisk))
-              assert.ok(before.has(s.value), "secret exposed by the rewrite");
+            const before = new Set(await exposedInView(content));
+            for (const v of await exposedInView(newDisk))
+              assert.ok(before.has(v), "secret exposed by the rewrite");
           }
         },
       ),

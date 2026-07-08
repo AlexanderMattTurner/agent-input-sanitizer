@@ -613,6 +613,27 @@ const VOID_ELEMENTS = new Set([
   "wbr",
 ]);
 
+// Elements whose content is RAW TEXT / RCDATA / script data: parse5 recognizes
+// NO markup inside them (a `<!…` is not a comment, a `<b>` is not a tag) until
+// the matching end tag. The per-tag balance walk must model this or it would
+// splice a `<!…>` inside `<style>`/`<script>` as a bogus comment — mangling
+// source these tags are meant to preserve verbatim (and diverging from the
+// flow/source branch, which parse5 handles correctly). `noscript` is omitted:
+// under fragment parsing (scripting disabled) parse5 parses its content as
+// normal markup, so scanning it is correct. Once `plaintext` opens it runs to
+// EOF and never closes.
+const RAW_TEXT_ELEMENTS = new Set([
+  "script",
+  "style",
+  "textarea",
+  "title",
+  "xmp",
+  "iframe",
+  "noembed",
+  "noframes",
+  "plaintext",
+]);
+
 /**
  * True for an element a rendered page would not show: `hidden` attribute or a
  * hiding inline style. Works on both hast nodes and parseHtmlTag results.
@@ -825,6 +846,36 @@ const mdParser = unified().use(remarkParse).use(remarkGfm);
 // leaked through; this finds the candidates to validate.
 const BOGUS_COMMENT_OPEN_RE = /<[!?]/g;
 
+// Raw source ending in UNTERMINATED markup — a `<` that opens a construct with
+// no closing `>` yet: an open tag (`<span`), an end tag (`</A`), or a bogus
+// comment / declaration (`<!`, `<?`). Per the HTML tokenizer such a construct
+// keeps consuming the input stream until the next `>`, so it absorbs the
+// following inline-html node (an open tag swallows it as bogus attributes; a
+// bogus end tag / `<!…` opens a bogus comment). parse5 (the flow/source branch,
+// via rehype) models this; the per-tag balance walk below does not, so without
+// this a fragment parses differently as a flow block than as a paragraph —
+// breaking idempotency once a first pass demotes a block to phrasing (see
+// html-property "second pass changes nothing"). An open/end tag requires a
+// name letter after the `<`/`</`, so literal prose like `a < b` or an `i <3 u`
+// emoticon is not mistaken for markup.
+const UNTERMINATED_MARKUP_TAIL_RE = /<(?:[!?]|\/?[a-zA-Z])[^>]*$/;
+
+/**
+ * Fold a raw source slice into the "inside an unterminated tag" state. A `>`
+ * closes any open construct (so only the tail after the last `>` can leave one
+ * open); with no `>` an already-open construct stays open. Operating on the
+ * RAW source — not mdast node values — means markdown constructs that restructure
+ * the character stream (code spans, emphasis, escapes) are seen exactly as
+ * parse5 sees them, since only the literal `<`/`>` bytes matter.
+ * @param {boolean} absorbing
+ * @param {string} raw
+ * @returns {boolean}
+ */
+function foldAbsorb(absorbing, raw) {
+  if (raw.includes(">")) return UNTERMINATED_MARKUP_TAIL_RE.test(raw);
+  return absorbing || UNTERMINATED_MARKUP_TAIL_RE.test(raw);
+}
+
 /**
  * Map of comment start-offset -> end-offset (exclusive) for EVERY comment the
  * HTML tokenizer finds in `value`, from a SINGLE rehype parse. Validated against
@@ -925,60 +976,120 @@ function updateHiddenState(state, value, nodeEnd, ranges) {
   if (el && el.tagName === state.tag) state.depth++;
 }
 
+// The block-level phrasing containers whose inline html the balance walk owns.
+// (Nested phrasing — emphasis, links — is reached by recursing from these; html
+// directly under a flow parent like listItem/blockquote is owned by the flow
+// branch instead.)
+const PHRASING_ROOTS = new Set(["paragraph", "heading", "tableCell"]);
+
 /**
- * Balance-walk the direct children of a markdown container node: a hidden
- * open tag starts a removal region that runs to its matching close (or the
- * container's end when unbalanced — fail-closed), comments become single-node
- * ranges, and preserved tags are counted. Inline html is tokenized per TAG
- * (an element's content sits in sibling text nodes), which is why this walk
- * exists instead of handing the value to rehype.
+ * Yield the `html` leaf nodes of a phrasing subtree in document order,
+ * descending through nested inline containers (emphasis, links, …) but NOT into
+ * flow parents (their html belongs to the flow/source branch).
  * @param {any} node
+ * @returns {Generator<any>}
+ */
+function* inlineHtmlLeaves(node) {
+  for (const child of node.children) {
+    if (child.type === "html") yield child;
+    else if (
+      Array.isArray(child.children) &&
+      !FLOW_HTML_PARENTS.has(child.type)
+    )
+      yield* inlineHtmlLeaves(child);
+  }
+}
+
+/** @param {any} node @returns {boolean} */
+function hasHtmlLeaf(node) {
+  for (const _ of inlineHtmlLeaves(node)) return true;
+  return false;
+}
+
+/**
+ * Balance-walk a markdown phrasing root's html leaves in document order: a
+ * hidden open tag starts a removal region that runs to its matching close (or
+ * the container's end when unbalanced — fail-closed), comments become
+ * single-node ranges, and preserved tags are counted. Inline html is tokenized
+ * per TAG (an element's content sits in sibling text nodes), which is why this
+ * walk exists instead of handing the value to rehype.
+ *
+ * The absorb state is folded from the RAW source between html nodes (not from
+ * mdast node values), so markdown constructs that reshuffle the character
+ * stream — code spans, emphasis, escapes — are seen exactly as parse5 sees
+ * them. The root is walked in full document order (descending through nested
+ * emphasis/links) so an unterminated tag in one node absorbs markup in a
+ * sibling/nested node the way it does in the flat token stream.
+ * @param {any} node
+ * @param {string} text the full document source, for raw-slice absorb folding
  * @param {Array<{start: number, end: number, kind: "comment" | "hidden"}>} ranges
  * @param {ReturnType<typeof newWarned>} warned
  */
-function scanInlineChildren(node, ranges, warned) {
+function scanInlineChildren(node, text, ranges, warned) {
   const state =
     /** @type {{ tag: string | null, depth: number, regionStart: number }} */ ({
       tag: null,
       depth: 0,
       regionStart: 0,
     });
-  for (const child of node.children) {
-    if (child.type !== "html") continue;
+  // "Inside an unterminated tag / bogus comment" — parse5 absorbs following
+  // markup into it until the next `>`.
+  let absorbing = false;
+  // Non-null while inside a raw-text element (its lowercased tag name); content
+  // is opaque until the matching end tag.
+  let rawText = /** @type {string | null} */ (null);
+  // End offset of the last html node processed; the raw slice from here to the
+  // next html node is what parse5 tokenizes between them.
+  let prevEnd = node.position.start.offset;
+  for (const child of inlineHtmlLeaves(node)) {
     const value = child.value;
     const base = child.position.start.offset;
-    if (state.depth > 0) {
-      updateHiddenState(state, value, child.position.end.offset, ranges);
-      continue;
-    }
-    // Comments can share an inline html node with neighboring constructs
-    // (e.g. in a list item, `<!-- c -->!` is ONE node), so comment spans are
-    // located within the value and spliced individually rather than assuming
-    // the node IS the comment.
-    collectCommentRanges(value, base, child.position.end.offset, ranges);
-    const tagName = isHiddenOpen(value);
-    if (tagName) {
-      // A void element never emits a matching close, so a balance region would
-      // extend to the container end and splice out following visible text. Emit
-      // a single-node range instead (the flow/source branch already does this).
-      if (VOID_ELEMENTS.has(tagName)) {
-        ranges.push({
-          start: base,
-          end: child.position.end.offset,
-          kind: "hidden",
-        });
-        continue;
+    const end = child.position.end.offset;
+    // Fold the inter-node source (markdown text, code spans, emphasis markers)
+    // into the absorb state before deciding what to do with this html node.
+    absorbing = foldAbsorb(absorbing, text.slice(prevEnd, base));
+
+    if (rawText) {
+      // Raw-text content is opaque; only the matching end tag ends the region.
+      if (new RegExp(`</${rawText}(?![a-z0-9-])`, "i").test(value))
+        rawText = null;
+    } else if (state.depth > 0) {
+      updateHiddenState(state, value, end, ranges);
+    } else if (!absorbing) {
+      // Not absorbed into a preceding unterminated tag — scan normally.
+      // Comments can share an inline html node with neighboring constructs
+      // (e.g. in a list item, `<!-- c -->!` is ONE node), so comment spans are
+      // located within the value and spliced individually rather than assuming
+      // the node IS the comment.
+      collectCommentRanges(value, base, end, ranges);
+      const tagName = isHiddenOpen(value);
+      if (tagName) {
+        // A void element never emits a matching close, so a balance region
+        // would extend to the container end and splice out following visible
+        // text. Emit a single-node range instead (the source branch does too).
+        if (VOID_ELEMENTS.has(tagName))
+          ranges.push({ start: base, end, kind: "hidden" });
+        else {
+          state.tag = tagName;
+          state.depth = 1;
+          state.regionStart = base;
+        }
+      } else if (!value.startsWith("</")) {
+        const el = parseHtmlTag(value);
+        if (el) {
+          // A raw-text open tag starts an opaque region (a self-closing `/>`
+          // does not apply to these in HTML — they always open).
+          if (RAW_TEXT_ELEMENTS.has(el.tagName)) rawText = el.tagName;
+          if (REPORTED_TAGS.has(el.tagName)) countTag(warned, el.tagName);
+          if (hasDataSrc(el)) warned.dataSrc += 1;
+        }
       }
-      state.tag = tagName;
-      state.depth = 1;
-      state.regionStart = base;
-      continue;
     }
-    if (value.startsWith("</")) continue;
-    const el = parseHtmlTag(value);
-    if (!el) continue;
-    if (REPORTED_TAGS.has(el.tagName)) countTag(warned, el.tagName);
-    if (hasDataSrc(el)) warned.dataSrc += 1;
+    // else: absorbed into a preceding unterminated tag — parse5 treats it as
+    // tag soup, not a comment/element, so leave it untouched (fail open).
+
+    absorbing = foldAbsorb(absorbing, value);
+    prevEnd = end;
   }
   if (state.depth > 0) {
     ranges.push({
@@ -1027,17 +1138,16 @@ function scanMarkdown(text) {
     mergeWarned(warned, sub.warned);
   });
 
-  // Every phrasing container that holds inline html (paragraph, heading,
-  // tableCell, emphasis, …) gets the balance walk — not just paragraphs, so a
-  // hidden span inside a heading cannot slip through.
+  // Every phrasing ROOT that holds inline html (paragraph, heading, tableCell,
+  // …) gets the balance walk — not just paragraphs, so a hidden span inside a
+  // heading cannot slip through. Nested inline containers (emphasis, links, …)
+  // are walked as part of their root in document order, so the walk is skipped
+  // for them here to avoid double-scanning and to keep the absorb state flowing
+  // across those boundaries.
   visit(tree, (/** @type {any} */ node) => {
-    if (FLOW_HTML_PARENTS.has(node.type) || !Array.isArray(node.children))
-      return;
-    if (
-      !node.children.some((/** @type {any} */ child) => child.type === "html")
-    )
-      return;
-    scanInlineChildren(node, ranges, warned);
+    if (!PHRASING_ROOTS.has(node.type)) return;
+    if (!hasHtmlLeaf(node)) return;
+    scanInlineChildren(node, text, ranges, warned);
   });
 
   return { ranges, warned };

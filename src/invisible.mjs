@@ -392,14 +392,23 @@ function isJoinControl(ch) {
 /**
  * The nearest neighbour of index `i` in direction `dir`, skipping Transparent
  * (combining-mark) code points, as the Unicode cursive-joining algorithm does —
- * a harakat between a letter and a ZWNJ does not break the join. Returns "" past
- * the string boundary.
+ * a harakat between a letter and a ZWNJ does not break the join. Also skips any
+ * OTHER tracked invisible that is itself removable (blank fillers, format
+ * chars): it does no cursive-shaping work and gets stripped, so a joiner's real
+ * neighbour is the next surviving character. Without this a payload byte wedged
+ * between two joiners hides the joiner-RUN until a first pass removes it, after
+ * which a second pass strips the now-adjacent joiners — non-idempotent. Join
+ * controls (ZWNJ/ZWJ) are deliberately NOT skipped: they are the run signal.
+ * Returns "" past the string boundary.
  * @param {string[]} cps @param {number} i @param {number} dir  -1 or +1
  * @returns {string}
  */
 function effectiveNeighbor(cps, i, dir) {
   for (let j = i + dir; j >= 0 && j < cps.length; j += dir) {
-    if (jtOf(cps[j]) !== "T") return cps[j];
+    const ch = cps[j];
+    if (jtOf(ch) === "T") continue;
+    if (!isJoinControl(ch) && classify(ch) !== null) continue;
+    return ch;
   }
   return "";
 }
