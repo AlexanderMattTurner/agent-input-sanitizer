@@ -19,6 +19,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write # open/append a rollup issue when a fresh seed finds a failure
 
 jobs:
   fuzz:
@@ -31,6 +32,10 @@ jobs:
 
       - name: Setup base environment
         uses: ./.github/actions/setup-base-env
+        # The rehydrate property test drives the real Python redactor, so the
+        # suite needs uv + the Python deps here too.
+        with:
+          setup-python: "true"
 
       - name: Check if test script is configured
         id: check
@@ -51,5 +56,20 @@ jobs:
       # `fc.assert(..., { seed })` override (or FC_REPRODUCIBLE=1 for the
       # committed fixed-seed baseline).
       - name: Run full test suite with unseeded fast-check
+        id: fuzz
         if: steps.check.outputs.configured == 'true'
-        run: pnpm test
+        # Tee the output so the issue step can quote fast-check's counterexample
+        # + seed. pipefail keeps the step's failure the step's failure, not tee's.
+        run: |
+          set -o pipefail
+          pnpm test 2>&1 | tee fuzz-output.log
+
+      # No one watches the nightly Actions tab, so a counterexample here would
+      # rot silently. Turn it into a tracked, deduped issue instead.
+      - name: Open an issue on a fuzz failure
+        if: failure() && steps.fuzz.outcome == 'failure'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const run = require('./.github/scripts/nightly-fuzz-issue.js')
+            await run({github, context, core})

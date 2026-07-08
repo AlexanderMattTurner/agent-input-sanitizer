@@ -232,6 +232,7 @@ const HIDDEN_STYLE_CASES = [
   // ── per-declaration salvage on parse failure ──
   ["x;display:none", true], // one invalid decl must not blank the whole style (bypass fix)
   ["display:none;x", true], // invalid decl trailing the valid one is salvaged too
+  ["x;;display:none", true], // empty segment from `;;` is skipped, rest salvaged
   ["bad!!!;color:red", false], // salvage must not manufacture a false positive
   ["bad!!!;x also bad", false], // no declaration salvages at all — fails open
   // ── CSS-escaped keyword decoding ──
@@ -938,6 +939,61 @@ describe("splice fidelity and regressions", () => {
     assert.equal(
       applyHtml("> <div hidden>x</div>\n> visible"),
       `> ${HIDDEN_PLACEHOLDER}\n> visible`,
+    ));
+  it("regression: idempotent when a bogus end tag precedes a hidden element", () => {
+    // parse5 (flow branch) models `</A` as a bogus comment that absorbs the
+    // following `<div hidden>`, so it survives pass one; the balance walk must
+    // agree or pass two would splice it — breaking idempotency.
+    const input = `<div hidden=""></div> </A <div hidden=""></div>`;
+    const passOne = applyHtml(input);
+    assert.equal(passOne, `${HIDDEN_PLACEHOLDER} </A <div hidden=""></div>`);
+    assert.equal(applyHtml(passOne), passOne);
+  });
+  it("regression: a bogus end tag absorbs up to the next `>`, not beyond", () => {
+    // parse5 consumes `</A <span hidden>` as one bogus comment (to the first
+    // `>`), so that hidden span survives; a LATER hidden span, after the `>`,
+    // is back in normal content and is still spliced.
+    assert.equal(
+      applyHtml(`</A <span hidden>keep</span> <span hidden>gone</span> tail`),
+      `</A <span hidden>keep</span> ${HIDDEN_PLACEHOLDER} tail`,
+    );
+  });
+  it("regression: an unterminated OPEN tag absorbs the following inline html", () => {
+    // `<span` (no `>`) keeps consuming as bogus attributes per parse5, so the
+    // following bogus comment is absorbed, not spliced — and idempotent.
+    const input = `<!bogus x> <span <!bogus y>`;
+    const passOne = applyHtml(input);
+    assert.equal(passOne, `${COMMENT_PLACEHOLDER} <span <!bogus y>`);
+    assert.equal(applyHtml(passOne), passOne);
+  });
+  it("regression: absorb state crosses markdown emphasis and code-span boundaries", () => {
+    // markdown puts the hidden `<div>` inside emphasis / after a code span,
+    // splitting it from the absorbing `</div ` — but parse5 sees a flat stream,
+    // so both must stay idempotent (the hidden div is absorbed, not spliced).
+    for (const input of [
+      `${COMMENT_PLACEHOLDER} </div _! <div hidden="">_</div>`,
+      `${COMMENT_PLACEHOLDER} \`</div \` <div hidden=""></div>`,
+    ]) {
+      assert.equal(applyHtml(input), input, input);
+    }
+  });
+  for (const [tag, body] of [
+    ["style", "<!A"],
+    ["script", "<!--a-->"],
+    ["textarea", "</b"],
+    ["title", "<!--t-->"],
+  ]) {
+    it(`regression: raw-text <${tag}> content is preserved verbatim, not spliced as a comment`, () => {
+      // Inside RAWTEXT/RCDATA elements parse5 recognizes no markup, so a `<!…`
+      // is opaque text — splicing it would mangle source these tags preserve.
+      const input = `x <${tag}>${body}</${tag}> y`;
+      assert.equal(applyHtml(input), input);
+    });
+  }
+  it("regression: a hidden raw-text element is still spliced (hidden beats raw-text)", () =>
+    assert.doesNotMatch(
+      applyHtml("a <script hidden>SECRET</script> b"),
+      /SECRET/,
     ));
   it("a reported script does not modify the text at all", () => {
     const input = "prefix<script>x</script>suffix";

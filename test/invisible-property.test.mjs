@@ -22,17 +22,35 @@ const countOf = (s, ch) => s.split(ch).length - 1;
 const preservedJoiners = (s) => countOf(s, ZWNJ) + countOf(s, ZWJ);
 
 // The carve-out's real domain: letters of joiner-using scripts (Arabic + a
-// Devanagari pair), emoji bases + a skin-tone modifier, the two joiners, and a
-// few plain visible chars to form gaps. No ASCII-only noise — feed the domain
-// the change actually touches.
+// Devanagari pair with its virama), emoji bases + a skin-tone modifier, the two
+// joiners, variation selectors, emoji tag-sequence bytes, blank-filler carve-out
+// anchors, a leading-BOM candidate, and a few plain visible chars to form gaps.
+// No ASCII-only noise — feed the domain the change actually touches, including
+// the MALFORMED arrangements (a tag base with no CANCEL, a VS with no base, a
+// blank filler in a run) that exercise the fail-open/strip arms.
 const carveChar = fc.constantFrom(
   cp(0x645), // Arabic
   cp(0x62e), // Arabic
-  cp(0x915), // Devanagari
-  cp(0x937), // Devanagari
+  cp(0x915), // Devanagari consonant
+  cp(0x937), // Devanagari consonant
+  cp(0x94d), // Devanagari virama (anchors a preserved joiner)
   cp(0x1f468), // man (pictograph)
   cp(0x1f469), // woman (pictograph)
   cp(0x1f3fb), // skin-tone modifier
+  cp(0x1f3f4), // waving black flag (emoji tag-sequence base)
+  cp(0xe0067), // tag latin small g (tag specifier)
+  cp(0xe0062), // tag latin small b (tag specifier)
+  cp(0xe007f), // CANCEL TAG (terminates a tag sequence)
+  cp(0xfe0f), // VS16 emoji-presentation selector
+  cp(0xfe0e), // VS15 text-presentation selector
+  cp(0xfe00), // a standardized variation selector
+  cp(0xe0100), // an ideographic variation selector
+  cp(0x845b), // CJK ideograph (IVS base)
+  cp(0x2800), // Braille blank (blank-filler carve-out anchor)
+  cp(0x115f), // Hangul choseong filler
+  cp(0x3164), // Hangul filler
+  cp(0x34f), // combining grapheme joiner (zero-width Mn)
+  cp(0xfeff), // BOM / zero-width no-break space
   ZWNJ,
   ZWJ,
   "a",

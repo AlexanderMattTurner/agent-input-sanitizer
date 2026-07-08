@@ -54,18 +54,65 @@ const safeAttrValue = fc
 const attribute = fc
   .tuple(fc.constantFrom("style", "hidden", "src", "href", "id"), safeAttrValue)
   .map(([name, value]) => `${name}="${value}"`);
+// Inner content excludes `<`/`>`/`&`: raw markup buried inside an element's
+// text is itself adversarial markup, modeled explicitly by `malformedInlineToken`
+// below. Left unrestricted it would generate FOREIGN-content edge cases
+// (`<svg><!…` where a bogus comment inside svg absorbs the `</svg>` close, per
+// the HTML foreign-content insertion mode) that the markdown balance walk
+// cannot match against parse5 without becoming parse5 — a known limitation of
+// the two-parser design, out of scope here.
+const safeInner = fc
+  .string({ maxLength: 40 })
+  .map((raw) => raw.replace(/[<>&]/g, ""));
 const htmlElement = fc
-  .tuple(
-    tagName,
-    fc.array(attribute, { maxLength: 3 }),
-    fc.string({ maxLength: 40 }),
-  )
+  .tuple(tagName, fc.array(attribute, { maxLength: 3 }), safeInner)
   .map(([name, attrs, inner]) => {
     const attrText = attrs.length === 0 ? "" : " " + attrs.join(" ");
     return `<${name}${attrText}>${inner}</${name}>`;
   });
+// Malformed / adversarial inline tokens a well-formed `htmlElement` can never
+// emit: bogus comments, bare unterminated end tags, and inline hidden VOID
+// elements. These are the token shapes whose absence let a real idempotency bug
+// (a bare `</A` absorbing a following hidden element per parse5, but not in the
+// per-tag balance walk) slip past this suite — so the fuzzer must build them.
+const malformedInlineToken = fc.constantFrom(
+  // bogus comments / declarations
+  "<!bogus secret>",
+  "<?php evil ?>",
+  "<![CDATA[ secret ]]>",
+  "<!doctype html>",
+  // bare unterminated end tags (parse5 opens a bogus comment that absorbs
+  // the following inline markup)
+  "</A",
+  "</div",
+  "</span x",
+  "</b ",
+  // inline hidden void elements (no closing tag; a balance region would
+  // over-splice, so each must be a single-node splice)
+  "<img hidden>",
+  "<img src=x hidden>",
+  '<input style="display:none">',
+  "<br hidden>",
+  "<hr hidden>",
+  // stray partial open
+  "<div hidden",
+  "<span",
+  // raw-text / RCDATA elements: `<!…`/`</…` inside is opaque content, not
+  // markup, and must survive verbatim
+  "<style><!x</style>",
+  "<script><!--c--></script>",
+  "<textarea></b</textarea>",
+  "<title><!--t--></title>",
+);
 const arbitraryHtmlFragment = fc
-  .array(fc.oneof(fc.string({ maxLength: 60 }), htmlElement), { maxLength: 6 })
+  .array(
+    fc.oneof(
+      { weight: 3, arbitrary: fc.string({ maxLength: 60 }) },
+      { weight: 3, arbitrary: htmlElement },
+      { weight: 2, arbitrary: malformedInlineToken },
+    ),
+    { maxLength: 8 },
+  )
   .map((parts) => parts.join(" "));
 
 describe("property: sanitizeHtml is idempotent", () => {
@@ -136,7 +183,67 @@ const hidingDeclarations = {
   "text-indent": fc
     .tuple(casedPropertyName("text-indent"), offscreenLength)
     .map(([name, length]) => `${name}: ${length}`),
+  "content-visibility": casedPropertyName("content-visibility").map(
+    (name) => `${name}: hidden`,
+  ),
+  // rotateX/rotateY by an odd quarter-turn projects to zero area (edge-on).
+  "transform-rotate": fc
+    .tuple(
+      casedPropertyName("transform"),
+      fc.constantFrom("rotateX", "rotateY", "rotatex", "rotatey"),
+      fc.constantFrom("90", "270", "-90", "90.0"),
+    )
+    .map(([name, fn, deg]) => `${name}: ${fn}(${deg}deg)`),
+  // translateX/translateY past the viewport hides off-screen.
+  "transform-translate": fc
+    .tuple(
+      casedPropertyName("transform"),
+      fc.constantFrom("translateX", "translateY", "translatex", "translatey"),
+      offscreenLength,
+    )
+    .map(([name, fn, length]) => `${name}: ${fn}(${length})`),
+  // filter: opacity(0) drops the element to fully transparent.
+  filter: fc
+    .tuple(
+      casedPropertyName("filter"),
+      fc.constantFrom("0", "0.0", "0%", "0.5%"),
+    )
+    .map(([name, amount]) => `${name}: opacity(${amount})`),
+  // clip-path clipping the box to nothing.
+  "clip-path": fc
+    .tuple(
+      casedPropertyName("clip-path"),
+      fc.constantFrom(
+        "inset(50%)",
+        "inset(60% 70%)",
+        "circle(0)",
+        "circle(0px)",
+      ),
+    )
+    .map(([name, shape]) => `${name}: ${shape}`),
 };
+
+// Color-based hiding (same-color, transparent) is inherently about the `color`
+// value, so the shared `unrelatedDecl` noise (which can append `; color: red`)
+// would legitimately override the hide. These variants get color-free noise.
+const colorHidingDeclarations = {
+  // Same concrete color on both sides (white-on-white) — invisible to a human.
+  "same-color": fc
+    .constantFrom("#777777", "#000000", "#ffffff", "#abcdef")
+    .map((hex) => `color: ${hex}; background: ${hex}`),
+  // Fully transparent text with no gradient/text-fill painting it visible.
+  "color-transparent": casedPropertyName("color").map(
+    (name) => `${name}: transparent`,
+  ),
+};
+const colorSafeExtra = fc.constantFrom("", "; margin: 1px", "; padding: 2px");
+const wrapWithColorSafeNoise = (declaration) =>
+  fc
+    .tuple(whitespace, declaration, importantFlag, whitespace, colorSafeExtra)
+    .map(
+      ([leading, decl, flag, trailing, extra]) =>
+        leading + decl + flag + trailing + extra,
+    );
 // `font-size:0` reliably collapses text to nothing on its own, so it stays a
 // standalone hiding signal. `height`/`width` are deliberately NOT standalone
 // here — with the default `overflow:visible` a zero-sized box still paints
@@ -199,11 +306,36 @@ const visibleDeclaration = fc.constantFrom(
   "text-indent: -0.5em",
   "clip-path: inset(10%)",
   "clip-path: circle(50%)",
+  "clip-path: inset(50% 0 0 0)", // one edge open (bottom half visible)
   "color: white",
   "color: white; background: #fefefe",
   "color: #777; background: #888",
   "color: red",
+  "content-visibility: auto", // perf hint; content stays visible
+  "content-visibility: visible",
+  "transform: rotateX(89deg)", // not an odd quarter-turn
+  "transform: rotateZ(90deg)", // in-plane spin stays visible
+  "filter: opacity(1)",
+  "filter: opacity(0.5)",
+  "filter: blur(2px)",
+  "color: transparent; -webkit-background-clip: text", // gradient-heading recipe
+  "color: transparent; background-clip: text",
 );
+
+describe("property: color-based hidden-style variants flagged by isHiddenStyle", () => {
+  for (const [variantName, declaration] of Object.entries(
+    colorHidingDeclarations,
+  )) {
+    it(`flags ${variantName}`, () =>
+      checkProperty(wrapWithColorSafeNoise(declaration), (styleString) =>
+        assert.equal(
+          isHiddenStyle(styleString),
+          true,
+          `not flagged: ${JSON.stringify(styleString)}`,
+        ),
+      ));
+  }
+});
 
 describe("property: ordinary visible styles are never flagged hidden", () => {
   it("no curated visible declaration reads as hidden under noise", () =>

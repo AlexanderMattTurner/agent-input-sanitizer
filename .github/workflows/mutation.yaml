@@ -15,6 +15,7 @@ on:
       - ".github/scripts/mutation-changed.sh"
       - ".github/scripts/run-mutation-shard.sh"
       - ".github/scripts/aggregate-mutation.mjs"
+      - ".github/scripts/expand-shards.mjs"
   # No paths filter on pull_request: this is a Required check, and a workflow-level
   # path filter would skip the whole workflow (including the mutation-passed
   # reporter) on PRs that don't touch these paths, stranding the check at
@@ -62,7 +63,10 @@ jobs:
 
       - name: Load shard matrix
         id: shards
-        run: echo "shards=$(jq -c . .github/mutation-shards.json)" >> "$GITHUB_OUTPUT"
+        # Expand the declarative config into concrete line-range slices from the
+        # file's current length (see .github/scripts/expand-shards.mjs); the
+        # aggregate gate calls the same expander so their shard counts match.
+        run: echo "shards=$(node .github/scripts/expand-shards.mjs)" >> "$GITHUB_OUTPUT"
 
   # The ~2473 mutants are split into disjoint slices (line ranges for the big
   # files, whole files for the rest) so the slices run in parallel across
@@ -92,6 +96,11 @@ jobs:
 
       - name: Setup base environment
         uses: ./.github/actions/setup-base-env
+        # Stryker's dry run executes the whole suite, including the rehydrate
+        # property test that drives the real Python redactor, so every shard
+        # needs uv + the Python deps.
+        with:
+          setup-python: "true"
 
       # Restore this shard's incremental result file so only mutants whose source
       # or covering tests changed since the last run are re-evaluated; the rest
