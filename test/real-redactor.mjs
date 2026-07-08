@@ -20,12 +20,22 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const pythonDir = join(here, "..", "python");
+const repoRoot = join(here, "..");
+const pythonDir = join(repoRoot, "python");
 
 // Persistent NDJSON worker: import the engine once, then serve one response line
 // per request line. Mirrors the daemon's "pay plugin setup once" rationale.
+//
+// The engine is reached exactly as the pytest suite reaches it (see
+// tests/secrets/conftest.py): run from the repo root's *virtual* project so
+// `uv run --extra dev` resolves the engine's deps (detect-secrets is a hard
+// import) from the root lock, and put `python/` on sys.path so the package
+// imports from the working tree. Running under `python/` instead would pick the
+// editable distribution project, forcing a hatchling build of the bundled CLI
+// and minting a stray python/uv.lock — neither of which we want here.
 const DRIVER = `
 import sys, json
+sys.path.insert(0, ${JSON.stringify(pythonDir)})
 from agent_input_sanitizer.secrets.engine import redact_map
 from agent_input_sanitizer.secrets.config import RedactorConfig
 for line in sys.stdin:
@@ -49,7 +59,11 @@ function fail(err) {
 
 function ensureWorker() {
   if (worker) return;
-  worker = spawn("uv", ["run", "python", "-c", DRIVER], { cwd: pythonDir });
+  worker = spawn(
+    "uv",
+    ["run", "--extra", "dev", "--frozen", "python", "-c", DRIVER],
+    { cwd: repoRoot },
+  );
   worker.on("error", (err) =>
     fail(new Error(`real redactor worker failed to start: ${err.message}`)),
   );
