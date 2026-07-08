@@ -91,20 +91,29 @@ max_version() {
 # `|| echo "0.0.0"` would silently rebase the version to 0.0.1 on any outage and
 # repoint the `latest` dist-tag downward, so anything other than E404 fails loud.
 PACKAGE_NAME=$(node -p "require('./package.json').name")
+# Keep npm's stdout (the version, and ONLY the version) apart from its stderr
+# (E404 diagnostics AND config-load warnings like the "Unknown project config"
+# line pnpm-only keys in .npmrc provoke). Merging them with `2>&1` and taking
+# `head -n1` grabs whichever printed first — under an npm that warns, that is
+# the warning, not the version, and the semver check below then rejects a
+# perfectly-published package. stdout carries the value; stderr is diagnostics.
 NPM_VIEW_RC=0
-NPM_VIEW_OUTPUT=$(npm view "$PACKAGE_NAME" version 2>&1) || NPM_VIEW_RC=$?
-if [[ "$NPM_VIEW_RC" -eq 0 ]]; then
-  CURRENT_VERSION="$NPM_VIEW_OUTPUT"
-elif grep -q "E404" <<<"$NPM_VIEW_OUTPUT"; then
-  CURRENT_VERSION="0.0.0"
-else
-  log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $NPM_VIEW_OUTPUT"
-  exit 1
+NPM_VIEW_STDERR_FILE=$(mktemp)
+CURRENT_VERSION=$(npm view "$PACKAGE_NAME" version 2>"$NPM_VIEW_STDERR_FILE") || NPM_VIEW_RC=$?
+NPM_VIEW_STDERR=$(cat "$NPM_VIEW_STDERR_FILE")
+rm -f "$NPM_VIEW_STDERR_FILE"
+if [[ "$NPM_VIEW_RC" -ne 0 ]]; then
+  if grep -q "E404" <<<"$NPM_VIEW_STDERR"; then
+    CURRENT_VERSION="0.0.0"
+  else
+    log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $NPM_VIEW_STDERR"
+    exit 1
+  fi
 fi
-# `npm view` can print nothing on a success exit (never-published package) or
-# emit a prerelease like `1.2.3-beta.0`; take the first line and require strict
-# X.Y.Z so the arithmetic bump below can't silently misfire. Empty -> 0.0.0
-# (first release); any other non-semver value fails loudly.
+# `npm view` prints nothing on a success exit for a never-published package.
+# stdout is the version alone, so require strict X.Y.Z (empty -> 0.0.0, first
+# release) and fail loud on anything non-semver rather than let the arithmetic
+# bump below silently misfire.
 CURRENT_VERSION=$(printf '%s\n' "$CURRENT_VERSION" | head -n1)
 [[ -z "$CURRENT_VERSION" ]] && CURRENT_VERSION="0.0.0"
 if ! [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
