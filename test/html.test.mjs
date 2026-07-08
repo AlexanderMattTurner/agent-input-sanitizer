@@ -939,6 +939,23 @@ describe("splice fidelity and regressions", () => {
       applyHtml("> <div hidden>x</div>\n> visible"),
       `> ${HIDDEN_PLACEHOLDER}\n> visible`,
     ));
+  it("regression: idempotent when a bogus end tag precedes a hidden element", () => {
+    // parse5 (flow branch) models `</A` as a bogus comment that absorbs the
+    // following `<div hidden>`, so it survives pass one; the balance walk must
+    // agree or pass two would splice it — breaking idempotency.
+    const input = `<div hidden=""></div> </A <div hidden=""></div>`;
+    const passOne = applyHtml(input);
+    assert.equal(passOne, `${HIDDEN_PLACEHOLDER} </A <div hidden=""></div>`);
+    assert.equal(applyHtml(passOne), passOne);
+  });
+  it("regression: a bogus end tag absorbs only the immediately-following node", () => {
+    // The tail `</A` skips the next inline-html node but nothing after it, so a
+    // later hidden span is still spliced.
+    assert.equal(
+      applyHtml(`</A <span hidden>keep</span> <span hidden>gone</span> tail`),
+      `</A <span hidden>keep</span> ${HIDDEN_PLACEHOLDER} tail`,
+    );
+  });
   it("a reported script does not modify the text at all", () => {
     const input = "prefix<script>x</script>suffix";
     const result = sanitizeHtml(input);

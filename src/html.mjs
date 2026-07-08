@@ -825,6 +825,15 @@ const mdParser = unified().use(remarkParse).use(remarkGfm);
 // leaked through; this finds the candidates to validate.
 const BOGUS_COMMENT_OPEN_RE = /<[!?]/g;
 
+// A text node whose tail is an unterminated end tag (`</A` with no closing
+// `>`). Per the HTML spec a bogus end tag opens a bogus comment that runs to
+// the next `>`, absorbing the following inline markup. parse5 (the flow/source
+// branch, via rehype) models this; the per-tag balance walk below does not, so
+// without this guard a fragment parses differently as a flow block than as a
+// paragraph — breaking idempotency once a first pass demotes a block to
+// phrasing (see html-property "second pass changes nothing").
+const BOGUS_END_TAG_TAIL_RE = /<\/[a-zA-Z][^>]*$/;
+
 /**
  * Map of comment start-offset -> end-offset (exclusive) for EVERY comment the
  * HTML tokenizer finds in `value`, from a SINGLE rehype parse. Validated against
@@ -943,12 +952,25 @@ function scanInlineChildren(node, ranges, warned) {
       depth: 0,
       regionStart: 0,
     });
+  // Set when the previous sibling text node ended with a bogus (unterminated)
+  // end tag, which absorbs the next inline-html node per parse5. Cleared by any
+  // sibling so only the *immediately* following html node is skipped.
+  let absorbNext = false;
   for (const child of node.children) {
-    if (child.type !== "html") continue;
+    if (child.type !== "html") {
+      absorbNext =
+        child.type === "text" && BOGUS_END_TAG_TAIL_RE.test(child.value);
+      continue;
+    }
     const value = child.value;
     const base = child.position.start.offset;
     if (state.depth > 0) {
+      absorbNext = false;
       updateHiddenState(state, value, child.position.end.offset, ranges);
+      continue;
+    }
+    if (absorbNext) {
+      absorbNext = false;
       continue;
     }
     // Comments can share an inline html node with neighboring constructs
