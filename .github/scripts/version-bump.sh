@@ -92,13 +92,21 @@ max_version() {
 # repoint the `latest` dist-tag downward, so anything other than E404 fails loud.
 PACKAGE_NAME=$(node -p "require('./package.json').name")
 NPM_VIEW_RC=0
-NPM_VIEW_OUTPUT=$(npm view "$PACKAGE_NAME" version 2>&1) || NPM_VIEW_RC=$?
+# Capture stdout and stderr SEPARATELY. npm prints the version to stdout but
+# routes warnings (e.g. "Unknown project config" for pnpm-only .npmrc keys like
+# confirm-modules-purge) and the E404 "not published" error to stderr. Folding
+# them together with `2>&1` let a warning land as the first line of the captured
+# output, so the `head -n1` below parsed the warning as the version and the
+# semver guard rejected it. Keep stdout clean for parsing; read E404 off stderr.
+NPM_VIEW_ERR=$(mktemp)
+trap 'rm -f "$NPM_VIEW_ERR"' EXIT
+NPM_VIEW_OUTPUT=$(npm view "$PACKAGE_NAME" version 2>"$NPM_VIEW_ERR") || NPM_VIEW_RC=$?
 if [[ "$NPM_VIEW_RC" -eq 0 ]]; then
   CURRENT_VERSION="$NPM_VIEW_OUTPUT"
-elif grep -q "E404" <<<"$NPM_VIEW_OUTPUT"; then
+elif grep -q "E404" "$NPM_VIEW_ERR"; then
   CURRENT_VERSION="0.0.0"
 else
-  log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $NPM_VIEW_OUTPUT"
+  log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $(cat "$NPM_VIEW_ERR")"
   exit 1
 fi
 # `npm view` can print nothing on a success exit (never-published package) or
