@@ -19,6 +19,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { expandShards } from "./expand-shards.mjs";
+
 const reportsDir = process.argv[2];
 if (!reportsDir) {
   throw new Error("usage: aggregate-mutation.mjs <reports-dir>");
@@ -47,10 +49,9 @@ const reportFiles = readdirSync(reportsDir, { recursive: true })
 
 // Every shard uploads exactly one report. Demand one per shard so a silently
 // missing artifact fails the gate loudly instead of scoring a subset as if it
-// were the whole project.
-const shardCount = JSON.parse(
-  readFileSync(join(repoRoot, ".github", "mutation-shards.json"), "utf8"),
-).length;
+// were the whole project. The count comes from the SAME expander the workflow
+// used to build the matrix, so the two can never drift.
+const shardCount = expandShards(repoRoot).length;
 if (reportFiles.length !== shardCount) {
   throw new Error(
     `Expected ${shardCount} shard report(s) (one per shard) but found ${reportFiles.length} under ${reportsDir}; refusing to gate on a partial result.`,

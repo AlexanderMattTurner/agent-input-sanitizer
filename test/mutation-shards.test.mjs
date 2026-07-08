@@ -1,15 +1,17 @@
 /**
  * Contract test for the sharded mutation-testing matrix.
  *
- * `.github/mutation-shards.json` partitions the mutation run across parallel CI
- * jobs (line ranges for the big files, whole files for the rest). Stryker's
- * config mutates `src/*.mjs`, but the sharded workflow enumerates files
- * explicitly — so a new source file, or a gap in the line ranges, would be
- * mutated by nobody and the gate would silently fail open over uncovered code.
+ * `.github/mutation-shards.json` declares which files to mutate: big files under
+ * `split` are chunked into `splitEvery`-line slices, the rest are hand-balanced
+ * whole-file `groups`. `.github/scripts/expand-shards.mjs` turns that into the
+ * concrete matrix at CI time from each file's real length. Stryker's config
+ * mutates `src/*.mjs`, but the sharded workflow enumerates files explicitly — so
+ * a new source file, or a hole in a split file's slices, would be mutated by
+ * nobody and the gate would silently fail open over uncovered code.
  *
- * This guards both holes: every `src/*.mjs` file is covered by exactly the shard
- * set, and the line ranges of any split file tile [1, EOF) with no gap or
- * overlap, ending open (so growth past the last boundary is still mutated).
+ * This guards both holes against the EXPANDED matrix (what CI actually runs):
+ * every `src/*.mjs` file is covered exactly once, and each split file's slices
+ * tile [1, EOF) with no gap or overlap, ending open.
  */
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
@@ -17,20 +19,21 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import {
+  expandShards,
+  EOF_SENTINEL,
+} from "../.github/scripts/expand-shards.mjs";
+
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
 }).trim();
 
-// The open-ended sentinel the last range of a split file must use so the tail of
-// the file is always mutated even after it grows. Kept in lockstep with
-// .github/mutation-shards.json.
-const EOF_SENTINEL = 99999;
-
-const shards = JSON.parse(
+const config = JSON.parse(
   readFileSync(join(repoRoot, ".github", "mutation-shards.json"), "utf8"),
 );
+const shards = expandShards(repoRoot);
 
-/** Parse "src/a.mjs:1-50,src/b.mjs" into [{file, range?}, ...]. */
+/** Parse "src/a.mjs:1-50,src/b.mjs" into [{file, start?, end?}, ...]. */
 const parseMutate = (mutate) =>
   mutate.split(",").map((entry) => {
     const [file, range] = entry.split(":");
@@ -40,6 +43,20 @@ const parseMutate = (mutate) =>
   });
 
 describe("mutation shard matrix", () => {
+  it("expands to a non-empty matrix of {id, mutate} shards with unique ids", () => {
+    assert.ok(shards.length > 0, "expander produced no shards");
+    for (const shard of shards) {
+      assert.equal(typeof shard.id, "string");
+      assert.equal(typeof shard.mutate, "string");
+    }
+    const ids = shards.map((s) => s.id);
+    assert.equal(
+      new Set(ids).size,
+      ids.length,
+      "shard ids must be unique (they key the per-shard incremental cache and artifact name)",
+    );
+  });
+
   it("covers exactly the src/*.mjs files Stryker mutates", () => {
     const onDisk = readdirSync(join(repoRoot, "src"))
       .filter((f) => f.endsWith(".mjs"))
@@ -55,11 +72,14 @@ describe("mutation shard matrix", () => {
     assert.deepEqual(
       inShards,
       onDisk,
-      "shard file set must equal src/*.mjs (add/remove a shard when a source file is added/removed)",
+      "shard file set must equal src/*.mjs (add a `split` entry or `group` when a source file is added/removed)",
     );
   });
 
-  it("tiles every split file's line ranges with no gap or overlap, ending open", () => {
+  it("tiles every split file's slices with no gap or overlap, ending open", () => {
+    assert.ok(config.split?.length > 0, "expected at least one split file");
+    const splitFiles = new Set(config.split.map((s) => s.file));
+
     const byFile = new Map();
     for (const shard of shards) {
       for (const entry of parseMutate(shard.mutate)) {
@@ -69,37 +89,52 @@ describe("mutation shard matrix", () => {
       }
     }
 
-    assert.ok(byFile.size > 0, "expected at least one line-range-split file");
+    assert.deepEqual(
+      [...byFile.keys()].sort(),
+      [...splitFiles].sort(),
+      "line-range slices must appear for exactly the declared split files",
+    );
 
     for (const [file, ranges] of byFile) {
       ranges.sort((a, b) => a.start - b.start);
-      assert.equal(ranges[0].start, 1, `${file}: first range must start at 1`);
+      assert.equal(ranges[0].start, 1, `${file}: first slice must start at 1`);
       for (let i = 1; i < ranges.length; i++) {
         assert.equal(
           ranges[i].start,
           ranges[i - 1].end + 1,
-          `${file}: range ${i} must start one line after the previous range ends (no gap/overlap)`,
+          `${file}: slice ${i} must start one line after the previous slice ends (no gap/overlap)`,
         );
       }
       assert.ok(
         ranges.at(-1).end >= EOF_SENTINEL,
-        `${file}: last range must end open (>= ${EOF_SENTINEL}) so the tail is always mutated`,
+        `${file}: last slice must end open (>= ${EOF_SENTINEL}) so the tail is always mutated`,
       );
 
-      // Tiling [1, EOF) is not enough: the ranges are static line numbers, so if
-      // the file SHRINKS below a boundary, every shard whose `start` now sits
-      // past EOF mutates zero lines and Stryker silently covers nothing while
-      // this test stays green. Pin each shard's `start` to the file's real line
-      // count so every range is guaranteed to cover at least one real line.
+      // No slice may start past the file's real end: that shard would mutate
+      // zero lines and cover nothing while this test stays green. The expander
+      // derives slice count from the live length, so this holds by construction
+      // — pin it so a regression in the expander is caught.
       const lineCount = readFileSync(join(repoRoot, file), "utf8").split(
         "\n",
       ).length;
       for (const range of ranges) {
         assert.ok(
           range.start <= lineCount,
-          `${file}: range start ${range.start} is past the file's real line count (${lineCount}); ` +
-            `the file shrank below a shard boundary, so this shard mutates zero lines and covers nothing — ` +
-            `re-tile .github/mutation-shards.json to the current file length`,
+          `${file}: slice start ${range.start} is past the file's real line count (${lineCount})`,
+        );
+      }
+    }
+  });
+
+  it("caps every split slice at splitEvery lines (last slice excepted, it ends open)", () => {
+    const { splitEvery } = config;
+    for (const shard of shards) {
+      for (const entry of parseMutate(shard.mutate)) {
+        if (entry.start === undefined || entry.end >= EOF_SENTINEL) continue;
+        assert.equal(
+          entry.end - entry.start + 1,
+          splitEvery,
+          `${shard.id}: interior slice must be exactly ${splitEvery} lines`,
         );
       }
     }
