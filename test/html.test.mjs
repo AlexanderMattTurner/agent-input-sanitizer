@@ -60,6 +60,31 @@ const HIDDEN_STYLE_CASES = [
   ["opacity:50%", false], // valid percentage: half-opaque, visible
   ["opacity:0px", false], // invalid unit — a browser ignores it, element stays visible
   ["opacity:0em", false], // invalid unit — fail open (was parseFloat'd to 0 → over-flagged)
+  // ── CSS-escape terminators normalized to LF (FF/CR/CRLF), as a browser does
+  //    before consuming one whitespace as the escape terminator; `\6e<ws>…\65`
+  //    spells `none`, so the hidden element must be detected ──
+  ["display:\\6e \\6f \\6e \\65", true], // plain-space terminators (anchor)
+  ["display:\\6e\\6f\\6e\\65", true], // FORM FEED terminators
+  ["display:\\6e\r\\6f\r\\6e\r\\65", true], // CR terminators
+  ["display:\\6e\r\n\\6f\r\n\\6e\r\n\\65", true], // CRLF terminators
+  // ── percentage zero-alpha is transparent (CSS Color 4), like the bare-zero form ──
+  ["color:rgb(0 0 0 / 0%)", true],
+  ["color:rgba(0,0,0,0%)", true],
+  ["color:rgb(0 0 0 / 50%)", false], // half-opaque percentage stays visible
+  // ── filter:opacity in scientific notation (mirrors the transform exponent arm) ──
+  ["filter:opacity(1e-3)", true], // ≈0 → invisible
+  ["filter:opacity(1e3)", false], // 1000 → clamps visible
+  // ── salvage splits on TOP-LEVEL ; only: a display:none inside a quoted value is
+  //    part of that value, not a real declaration, so it must not over-splice ──
+  ['x;content:"a;display:none;b"', false],
+  // A backslash-escaped char inside a quoted value: the escape must not end the
+  // string early, so the top-level `;` splitter keeps the value intact (and the
+  // `\`-then-char escape branch is exercised).
+  ['x;content:"a\\b;c"', false],
+  ["x;font-family:'a;b'", false], // single-quoted value: `;` inside is not a separator
+  ["x;background:url(a;b)", false], // `;` inside url()/parens is not a separator
+  ["x;background:url(a;display:none;b)", false], // display:none inside url() is NOT a real decl
+  ["x;a:b)c", false], // an unbalanced `)` at top level must not underflow the depth
   // ── zero / near-zero size (epsilon) ──
   // `height`/`width` alone (no `overflow:hidden`) are deliberately NOT
   // standalone-hidden: the default `overflow:visible` still paints

@@ -165,7 +165,9 @@ function isHidingTransform(transform) {
  */
 function isHidingFilter(filter) {
   if (!filter) return false;
-  const match = filter.match(/\bopacity\(\s*([0-9]*\.?[0-9]+)\s*(%?)\s*\)/i);
+  const match = filter.match(
+    /\bopacity\(\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(%?)\s*\)/i,
+  );
   if (!match) return false;
   const value = parseFloat(match[1]);
   const fraction = match[2] === "%" ? value / 100 : value;
@@ -346,7 +348,9 @@ function canonicalizeColorFunction(value) {
     alpha = parts[3];
     parts.length = 3;
   }
-  if (alpha !== null && /^\+?0*\.?0+$/.test(alpha)) return "transparent";
+  // A literal-zero alpha is fully transparent — bare number (`0`, `0.0`) or the
+  // CSS Color 4 percentage form (`0%`), which a browser also renders invisible.
+  if (alpha !== null && /^\+?0*\.?0+%?$/.test(alpha)) return "transparent";
   if (parts.length !== 3) return null;
   if (isRgb) {
     const channels = parts.map(rgbChannel);
@@ -495,6 +499,48 @@ function isOverflowHidden(val) {
 }
 
 /**
+ * Split a style string into declarations on top-level `;` only — a `;` inside a
+ * string (`"…"`/`'…'`) or a function's parens (`url(…)`) is part of a value, not
+ * a declaration separator, exactly as the CSS tokenizer treats it. A blind
+ * `split(";")` would break `content:"a;display:none;b"` into a bare
+ * `display:none` fragment and splice out VISIBLE content (a false positive).
+ * @param {string} styleStr
+ * @returns {string[]}
+ */
+function splitTopLevelDeclarations(styleStr) {
+  const decls = [];
+  let buf = "";
+  let depth = 0;
+  /** @type {string | null} */
+  let quote = null;
+  let escaped = false;
+  for (const ch of styleStr) {
+    if (quote) {
+      buf += ch;
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+    } else if (ch === "(") {
+      depth += 1;
+      buf += ch;
+    } else if (ch === ")") {
+      if (depth > 0) depth -= 1;
+      buf += ch;
+    } else if (ch === ";" && depth === 0) {
+      decls.push(buf);
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+  decls.push(buf);
+  return decls;
+}
+
+/**
  * Parse a style string into a property map, salvaging what we can when the
  * whole string is syntactically invalid. `style-to-object` throws on the
  * FIRST bad declaration and abandons the rest of the string, but a browser
@@ -503,9 +549,9 @@ function isOverflowHidden(val) {
  * cleanly" would let `x;display:none` hide content from a human (the browser
  * drops the bogus `x` and applies `display:none`) while going undetected
  * here — a splice bypass. So on a whole-string parse failure, this re-parses
- * each `;`-delimited declaration independently and keeps whichever ones
- * parse; a declaration that still fails on its own is dropped, matching the
- * browser's per-declaration recovery.
+ * each top-level declaration independently and keeps whichever ones parse; a
+ * declaration that still fails on its own is dropped, matching the browser's
+ * per-declaration recovery.
  * @param {string} styleStr
  * @returns {Record<string, unknown> | null}
  */
@@ -519,7 +565,7 @@ function parseStyleSalvage(styleStr) {
   /** @type {Record<string, unknown>} */
   const salvaged = {};
   let sawAny = false;
-  for (const decl of styleStr.split(";")) {
+  for (const decl of splitTopLevelDeclarations(styleStr)) {
     if (!decl.trim()) continue;
     try {
       // @ts-ignore -- see above
@@ -554,6 +600,13 @@ const IMPORTANT_FLAG_RE = /\s{0,8}!\s{0,8}important\s{0,8}$/i;
 
 /** @param {string} value @returns {string} */
 function decodeCssEscapes(value) {
+  // CSS input preprocessing (Syntax §3.3) normalizes CR, FF, and CRLF to LF
+  // BEFORE tokenizing, and one whitespace after a hex escape is consumed as its
+  // terminator. Do the same here first: otherwise an FF/CR/CRLF terminator — e.g.
+  // `display:\6e<FF>\6f<FF>\6e<FF>\65` — is left in place, so this decodes to
+  // "n\x0co\x0cn\x0ce" (!= "none") while a browser renders `none`, and the
+  // hidden-element splice is silently bypassed.
+  value = value.replace(/\r\n|[\r\f]/g, "\n");
   return value.replace(CSS_ESCAPE_RE, (_match, hex, char) => {
     if (!hex) return char;
     const codepoint = parseInt(hex, 16);
