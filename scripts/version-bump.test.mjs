@@ -180,7 +180,8 @@ test("an E404 npm view treats the package as unpublished (0.0.0)", () => {
 // The npm stub reports the package at 5.0.0 and answers the `pkg@<version>`
 // existence probe with success, so each run stops at the "already exists" guard
 // BEFORE any publish/push — nothing leaves the sandbox.
-const NPM_AT_5_STUB = 'if [[ "$2" == *@* ]]; then exit 0; else echo "5.0.0"; fi';
+const NPM_AT_5_STUB =
+  'if [[ "$2" == *@* ]]; then exit 0; else echo "5.0.0"; fi';
 
 for (const { name, subject, body } of [
   {
