@@ -95,6 +95,7 @@ const HIDDEN_STYLE_CASES = [
   ["position:absolute;clip:rect(auto,auto,auto,auto)", false], // auto edges unresolvable — fail open
   ["position:absolute;clip:rect(0px,5em,1em,0px)", false], // mismatched-unit pairs — fail open
   ["position:absolute;clip:rect(0,0,0)", false], // only 3 edges — malformed, fail open
+  ["position:absolute;clip:auto", false], // truthy clip with no rect() — fail open (isClipRectHidden !rect)
   ["position:absolute;left:10px", false],
   ["position:absolute;left:-900px", false],
   ["position:absolute;left:-10px", false],
@@ -168,6 +169,7 @@ const HIDDEN_STYLE_CASES = [
   ["transform:translateY(-100%)", false],
   ["transform:translate(-100%,0)", false],
   ["transform:translate(0,-999%)", false], // large % is still element-relative
+  ["transform:translateX()", false], // empty translate arg — isOffscreenTranslate !value early return
   ["position:absolute;left:100%;transform:translateX(-100%)", false], // right-aligned popover, on screen
   ["transform:scale(0.5)", false],
   ["transform:scale(0.8)", false], // mild shrink stays readable
