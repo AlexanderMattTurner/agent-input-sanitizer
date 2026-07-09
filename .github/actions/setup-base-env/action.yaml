@@ -21,9 +21,10 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # Install pnpm before setup-node so setup-node's built-in `cache: pnpm`
-    # can locate the pnpm store and restore+save it on a single round trip
-    # (a lone actions/cache/restore never writes the cache back).
+    # pnpm-lock.yaml is intentionally gitignored here, so setup-node's built-in
+    # `cache: pnpm` (which keys on the committed lockfile) can't engage and hard-
+    # errors "Dependencies lock file is not found". Omit dependency caching rather
+    # than fail the run or restore a store that never gets written back.
     - name: Install pnpm
       if: hashFiles('package.json') != ''
       uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -34,7 +35,6 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
         registry-url: ${{ inputs.registry-url }}
-        cache: pnpm
 
     - name: Install Node Dependencies
       if: hashFiles('package.json') != ''
