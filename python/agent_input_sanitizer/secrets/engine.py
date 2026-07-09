@@ -434,6 +434,48 @@ def _is_filesystem_path(m: re.Match[str]) -> bool:
     return _FS_PATH_RE.fullmatch(m.group("secret_value")) is not None
 
 
+# A bare origin/endpoint URL (`https://oauth2.googleapis.com/token`, an OAuth
+# discovery/authorize endpoint) is public content the model needs — but the
+# field-value regex captures the whole URL because the field NAME trips the
+# keyword (`token_url`, `secret_endpoint`, `access_token_url`). Redacting it
+# strips a public endpoint for no security gain. Skip a URL that carries no
+# credential material; keep redacting one that DOES embed a secret.
+_ENDPOINT_URL_RE = re.compile(r"https?://[^\s]+\Z", re.IGNORECASE)
+# Userinfo credentials in the authority (`https://user:pass@host/…`): a password
+# before the `@` is a real secret, so such a URL is never skipped.
+_URL_USERINFO_RE = re.compile(r"https?://[^/@\s]*:[^/@\s]*@", re.IGNORECASE)
+# An opaque credential-shaped run: >=20 CONTIGUOUS base64/hex-alphabet chars
+# mixing letters AND digits (a Slack webhook token path, a bearer blob) — the
+# high-entropy shape a benign path segment (`token`, `authorize`, `v2`,
+# `completions`) never takes. `-`/`_`/`.`/`/` are NOT in the run, so a
+# hyphen-joined dictionary path (`report-2024-01-15-final`) splits into short
+# words and is not mistaken for a secret.
+_URL_OPAQUE_RUN_RE = re.compile(r"[A-Za-z0-9]{20,}")
+
+
+def _has_opaque_run(value: str) -> bool:
+    """True when ``value`` contains a >=20-char contiguous alphanumeric run that
+    mixes letters and digits — an opaque credential-shaped token."""
+    return any(
+        any(c.isdigit() for c in run) and any(c.isalpha() for c in run)
+        for run in _URL_OPAQUE_RUN_RE.findall(value)
+    )
+
+
+def _is_public_endpoint_url(value: str) -> bool:
+    """True when the value is a bare origin/endpoint URL carrying no credential
+    material (no userinfo password, no opaque high-entropy token in the
+    path/query), so redacting it would strip a public endpoint. A URL that DOES
+    embed a secret (a Slack ``webhook_url`` token path, ``user:pass@``) is not
+    skipped. Attacker-safe on web ingress: a clean URL hides no secret, and a
+    smuggled token in the path trips the opaque-run gate."""
+    if _ENDPOINT_URL_RE.fullmatch(value) is None:
+        return False
+    if _URL_USERINFO_RE.match(value):
+        return False
+    return not _has_opaque_run(value)
+
+
 # A content-addressed digest is public data, not a credential: git/OCI object IDs
 # and bare blockchain hashes. Two separate patterns (not one alternation): each is
 # provably ReDoS-safe, but their union blows past recheck's node budget.
@@ -732,8 +774,8 @@ def _redact_core(
     def _replace_field(m: re.Match[str]) -> str:
         # Name-based skips (cursor / path / metadata field) are attacker-relabelable
         # on web ingress, so they only apply to local tool output; the value-shape
-        # skips (placeholder, content-digest, UUID) are trustworthy regardless of
-        # source and apply on web ingress too.
+        # skips (placeholder, content-digest, UUID, public endpoint URL) are
+        # trustworthy regardless of source and apply on web ingress too.
         name_skip = not web_ingress and (
             _is_benign_cursor(m)
             or _is_filesystem_path(m)
@@ -750,6 +792,7 @@ def _redact_core(
             or _is_placeholder_value(value)
             or _is_content_digest(value)
             or _is_uuid(value)
+            or _is_public_endpoint_url(value)
         ):
             return m.group(0)
         found.append("named secret field")
