@@ -56,6 +56,25 @@ test("auto-version.yaml invokes exactly the live hardened release script", () =>
   assert.ok(existsSync(LIVE_SCRIPT), "the invoked script must exist on disk");
 });
 
+test("the release checkout pushes as github-actions[bot], never a cross-account PAT", () => {
+  // The release-docs commit and vX.Y.Z tag are pushed with the credentials the
+  // checkout persists. A cross-account PAT (TEMPLATE_SYNC_TOKEN, minted for a
+  // different owner) is rejected 403 by this repo's remote, stranding every
+  // release: npm publishes but the tag never lands, so the next run re-reads the
+  // climbing npm version and bumps again. The push MUST ride GITHUB_TOKEN, whose
+  // `contents: write` authorizes github-actions[bot] on its own repo.
+  const yaml = readFileSync(AUTO_VERSION_YAML, "utf8");
+  const tokenLines = yaml
+    .split("\n")
+    .filter((l) => /^\s*token:/.test(l))
+    .map((l) => l.trim());
+  assert.deepEqual(
+    tokenLines,
+    ["token: ${{ secrets.GITHUB_TOKEN }}"],
+    "the checkout must pin GITHUB_TOKEN, not a fallback to a cross-account PAT",
+  );
+});
+
 test("the live release script carries the hardened npm-view logic", () => {
   const src = readFileSync(LIVE_SCRIPT, "utf8");
   // Positive markers: enumerate the idioms that make this the hardened copy, so

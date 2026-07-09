@@ -37,13 +37,18 @@ jobs:
     steps:
       - name: Checkout
         # Credentials stay persisted: version-bump.sh pushes the release-docs
-        # commit and the vX.Y.Z tag with them. A PAT lets the tag push clear any
-        # tag protection; falls back to GITHUB_TOKEN.
+        # commit and the vX.Y.Z tag with them as github-actions[bot]. The
+        # workflow's `contents: write` authorizes that bot to push to the default
+        # branch and tags of its own repo — do NOT swap in a cross-account PAT
+        # (e.g. TEMPLATE_SYNC_TOKEN, minted for a different owner), which the
+        # remote rejects with a 403 and silently strands every release: npm is
+        # published but the docs commit and tag never land, so the next run
+        # re-reads the climbing npm version and bumps again.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
         with:
           # Need full history so `git describe`/`git log` can find the last tag.
           fetch-depth: 0
-          token: ${{ secrets.TEMPLATE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup base environment
         uses: ./.github/actions/setup-base-env
