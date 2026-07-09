@@ -153,3 +153,45 @@ test("an E404 npm view treats the package as unpublished (0.0.0)", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- Automated major bumps are disabled ------------------------------------
+// A breaking-change marker (`type!:` subject or `BREAKING CHANGE:` footer) must
+// be CAPPED at a minor bump, never a major one: a stray `!` in a routine commit
+// must not leap the whole version line (the real cause of the 1.x -> 5.x drift).
+// The npm stub reports the package at 5.0.0 and answers the `pkg@<version>`
+// existence probe with success, so each run stops at the "already exists" guard
+// BEFORE any publish/push — nothing leaves the sandbox.
+const NPM_AT_5_STUB = 'if [[ "$2" == *@* ]]; then exit 0; else echo "5.0.0"; fi';
+
+for (const { name, subject, body } of [
+  {
+    name: "a `type!:` subject",
+    subject: "feat(api)!: drop the legacy field",
+    body: "",
+  },
+  {
+    name: "a `BREAKING CHANGE:` footer",
+    subject: "refactor(core): rework the seam",
+    body: "\n\nBREAKING CHANGE: the filterInjection seam signature changed",
+  },
+]) {
+  test(`${name} is capped at a minor bump, never a major one`, () => {
+    const { dir, binDir } = makeSandbox(NPM_AT_5_STUB);
+    try {
+      const git = (...args) =>
+        execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+      // A breaking-change commit past the v0.0.0 tag — the exact input that used
+      // to decide a major bump (5.x -> 6.0).
+      git("commit", "-q", "--allow-empty", "-m", subject + body);
+      const { status, stderr } = runScript(dir, binDir);
+      assert.equal(status, 0, stderr);
+      assert.match(stderr, /Conventional Commits bump level: minor/);
+      assert.match(stderr, /New version: 5\.1\.0/);
+      assert.doesNotMatch(stderr, /bump level: major/);
+      assert.doesNotMatch(stderr, /New version: 6\./);
+      assert.match(stderr, /automated MAJOR bumps are disabled/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
