@@ -77,6 +77,13 @@ const HIDDEN_STYLE_CASES = [
   // ── salvage splits on TOP-LEVEL ; only: a display:none inside a quoted value is
   //    part of that value, not a real declaration, so it must not over-splice ──
   ['x;content:"a;display:none;b"', false],
+  // A backslash-escaped char inside a quoted value: the escape must not end the
+  // string early, so the top-level `;` splitter keeps the value intact (and the
+  // `\`-then-char escape branch is exercised).
+  ['x;content:"a\\b;c"', false],
+  ["x;font-family:'a;b'", false], // single-quoted value: `;` inside is not a separator
+  ["x;background:url(a;b)", false], // `;` inside url()/parens is not a separator
+  ["x;a:b)c", false], // an unbalanced `)` at top level must not underflow the depth
   // ── zero / near-zero size (epsilon) ──
   // `height`/`width` alone (no `overflow:hidden`) are deliberately NOT
   // standalone-hidden: the default `overflow:visible` still paints
