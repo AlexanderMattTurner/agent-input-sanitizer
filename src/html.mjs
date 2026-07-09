@@ -81,6 +81,11 @@ const ABSOLUTE_UNIT_RE =
   /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:px|em|rem|ex|ch|pt|pc|in|cm|mm)$/;
 const VIEWPORT_UNIT_RE =
   /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:vw|vh|vmin|vmax|%)$/;
+// Like VIEWPORT_UNIT_RE but WITHOUT `%`: inside a `translate()` a percentage is
+// resolved against the element's OWN size, not the viewport, so it can't be
+// judged offscreen without layout (see isOffscreenTranslate).
+const VIEWPORT_LENGTH_RE =
+  /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:vw|vh|vmin|vmax)$/;
 
 /** @param {string} value @returns {boolean} */
 function isOffscreenOffset(value) {
@@ -94,6 +99,25 @@ function isOffscreenOffset(value) {
   // position), and a unit-blind "contains a negative number" guess flags those
   // benign expressions — which would splice visible text. Ambiguity must fail
   // OPEN (visible), so unresolved calc is left alone.
+  return false;
+}
+
+/**
+ * Like isOffscreenOffset but for a `translate()` argument, where a percentage
+ * resolves against the element's OWN size (not the viewport). A right-aligned
+ * popover `left:100%; transform:translateX(-100%)` sits fully on screen, so a
+ * `%` translate is unresolvable without layout and fails OPEN. Absolute units
+ * (px/em/…) and true viewport units (vw/vh/…) ARE viewport-relative and keep
+ * their offscreen thresholds.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isOffscreenTranslate(value) {
+  if (!value) return false;
+  if (ABSOLUTE_UNIT_RE.test(value))
+    return parseFloat(value) < OFFSCREEN_ABSOLUTE_THRESHOLD;
+  if (VIEWPORT_LENGTH_RE.test(value))
+    return parseFloat(value) <= OFFSCREEN_VIEWPORT_THRESHOLD;
   return false;
 }
 
@@ -126,7 +150,7 @@ function isHidingTransform(transform) {
   // test each — checking only the first arg missed a `translate(0, -9999px)`.
   for (const match of transform.matchAll(/\btranslate(?:[xy])?\(\s*([^)]*)/gi))
     for (const arg of match[1].split(","))
-      if (isOffscreenOffset(arg.trim())) return true;
+      if (isOffscreenTranslate(arg.trim())) return true;
   return false;
 }
 
@@ -148,13 +172,47 @@ function isHidingFilter(filter) {
   return fraction < NEAR_ZERO_EPSILON;
 }
 
+// A single `clip: rect(top, right, bottom, left)` edge, parsed to its number and
+// unit; `auto` and any non-length token yield null (unresolvable → fail open).
+const CLIP_EDGE_RE = /^([-+]?\d*\.?\d+)\s*([a-z%]*)$/;
+
+/**
+ * True when a legacy `clip: rect(...)` clips the element to ~ZERO AREA — the
+ * clipping window's width (`right - left`) or height (`bottom - top`) collapses
+ * to near nothing. Checking only that the FIRST edge is `0` (the old
+ * `rect(0…)`) spliced a VISIBLE `rect(0px,100px,100px,0px)` (a 100x100 window);
+ * mirrors `isClipPathHidden`'s all-edges rule. Edges may be comma- OR
+ * space-separated; an `auto`/unresolvable edge, or a pair in mismatched units,
+ * fails OPEN (not proven collapsed).
+ * @param {string} clip lowercased, trimmed
+ * @returns {boolean}
+ */
+function isClipRectHidden(clip) {
+  const rect = clip.match(/\brect\(([^)]*)\)/);
+  if (!rect) return false;
+  const parts = rect[1].split(/[\s,]+/).filter(Boolean);
+  if (parts.length !== 4) return false;
+  const edges = parts.map((part) => part.match(CLIP_EDGE_RE));
+  if (edges.some((edge) => edge === null)) return false;
+  const [top, right, bottom, left] = /** @type {RegExpMatchArray[]} */ (
+    edges
+  ).map((edge) => ({ num: parseFloat(edge[1]), unit: edge[2] }));
+  /**
+   * @param {{ num: number, unit: string }} a
+   * @param {{ num: number, unit: string }} b
+   */
+  const collapsed = (a, b) =>
+    a.unit === b.unit && Math.abs(a.num - b.num) < NEAR_ZERO_EPSILON;
+  return collapsed(left, right) || collapsed(top, bottom);
+}
+
 /** @param {(key: string) => string} val */
 function isPositionedOffscreen(val) {
   if (!/\babsolute\b|\bfixed\b/.test(val("position"))) return false;
   for (const side of ["left", "top", "right", "bottom"])
     if (isOffscreenOffset(val(side))) return true;
   const clip = val("clip");
-  return Boolean(clip && /rect\s*\(\s*0/.test(clip));
+  return Boolean(clip && isClipRectHidden(clip));
 }
 
 // CSS named colors that participate in a white-on-white / black-on-black style
@@ -389,11 +447,30 @@ function isClipPathHidden(clipPath) {
   return expandInsetEdges(parts).every(isCollapsingInsetEdge);
 }
 
-// Gradient-clipped / text-filled headings are VISIBLE despite `color:transparent`:
-// `background-clip:text` (or its `-webkit-` alias) paints the background through
-// the glyph shapes, and `-webkit-text-fill-color` overrides `color` for the fill.
-// Either signal means the transparent `color` is not the rendered text color, so
-// the same-`transparent` hide must fail open.
+// The color painted by `-webkit-text-stroke` (the `<color>` token of the
+// shorthand, or the `-webkit-text-stroke-color` longhand), canonicalized — or
+// "" when it does not resolve to a concrete color. The longhand is a whole
+// color value so canonicalizeColor handles it directly; the shorthand is
+// `<line-width> || <color>`, so the width token (a length) is skipped and the
+// remaining color token canonicalized.
+/** @param {(key: string) => string} val @returns {string} */
+function textStrokeColor(val) {
+  const longhand = canonicalizeColor(val("-webkit-text-stroke-color"));
+  if (isConcreteColor(longhand)) return longhand;
+  for (const token of val("-webkit-text-stroke").split(/\s+/).filter(Boolean)) {
+    const color = canonicalizeColor(token);
+    if (isConcreteColor(color)) return color;
+  }
+  return "";
+}
+
+// Gradient-clipped / text-filled / outlined headings are VISIBLE despite
+// `color:transparent`: `background-clip:text` (or its `-webkit-` alias) paints
+// the background through the glyph shapes, `-webkit-text-fill-color` overrides
+// `color` for the fill, and `-webkit-text-stroke` paints a visible outline
+// around the (transparent-filled) glyphs. Any of these means the transparent
+// `color` is not the rendered text color, so the same-`transparent` hide must
+// fail open.
 /** @param {(key: string) => string} val @returns {boolean} */
 function isTextPaintedVisible(val) {
   if (
@@ -402,7 +479,9 @@ function isTextPaintedVisible(val) {
   )
     return true;
   const fill = canonicalizeColor(val("-webkit-text-fill-color"));
-  return isConcreteColor(fill) && fill !== "transparent";
+  if (isConcreteColor(fill) && fill !== "transparent") return true;
+  const stroke = textStrokeColor(val);
+  return isConcreteColor(stroke) && stroke !== "transparent";
 }
 
 /** @param {(key: string) => string} val */
@@ -466,6 +545,13 @@ function parseStyleSalvage(styleStr) {
 // leaving it undecoded here is a detection bypass.
 const CSS_ESCAPE_RE = /\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)/g;
 
+// The trailing `!important` priority flag, stripped AFTER escape-decoding so an
+// escaped spelling (`none!\69mportant`) is caught. Bounded whitespace runs:
+// `\s*` on both sides of an unanchored match backtracks super-linearly
+// (redos/no-vulnerable); a CSS value never carries more than a couple of spaces
+// around `!important`.
+const IMPORTANT_FLAG_RE = /\s{0,8}!\s{0,8}important\s{0,8}$/i;
+
 /** @param {string} value @returns {string} */
 function decodeCssEscapes(value) {
   return value.replace(CSS_ESCAPE_RE, (_match, hex, char) => {
@@ -494,25 +580,25 @@ export function isHiddenStyle(styleStr) {
   const rawProps = parseStyleSalvage(styleStr);
   if (!rawProps) return false;
 
-  // CSS property names are case-insensitive and `!important` is a legal
-  // trailing flag; style-to-object preserves both verbatim.
+  // CSS property names are case-insensitive; style-to-object preserves the raw
+  // value (including any `!important` and CSS escapes) verbatim.
   /** @type {Record<string, string>} */
   const props = {};
-  for (const [key, value] of Object.entries(rawProps)) {
-    props[key.toLowerCase()] = String(value).replace(
-      // Bounded whitespace runs: `\s*` on both sides of an unanchored match
-      // backtracks super-linearly (redos/no-vulnerable). A CSS value never
-      // carries more than a couple of spaces around `!important`.
-      /\s{0,8}!\s{0,8}important\s{0,8}$/i,
-      "",
-    );
-  }
+  for (const [key, value] of Object.entries(rawProps))
+    props[key.toLowerCase()] = String(value);
 
-  // Values are CSS-escape-decoded before every keyword/length comparison
-  // below, so an escaped keyword (`no\6e e`) reads at its true decoded value.
+  // Values are CSS-escape-decoded BEFORE the `!important` flag is stripped and
+  // before every keyword/length comparison below: a browser decodes escapes
+  // first, so `none!\69mportant` renders `display:none !important` (hidden).
+  // Stripping `!important` off the RAW value missed the escaped spelling, so the
+  // value read as `none!important` (≠ `none`) and hidden content leaked. Decode,
+  // then strip the (now-literal) flag, then trim/lowercase for the compares.
   /** @param {string} key */
   const val = (key) =>
-    decodeCssEscapes((props[key] || "").toString().trim()).toLowerCase();
+    decodeCssEscapes((props[key] || "").toString())
+      .replace(IMPORTANT_FLAG_RE, "")
+      .trim()
+      .toLowerCase();
 
   if (val("display") === "none") return true;
   if (val("visibility") === "hidden" || val("visibility") === "collapse")

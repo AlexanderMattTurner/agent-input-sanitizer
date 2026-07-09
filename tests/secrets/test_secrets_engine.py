@@ -912,6 +912,93 @@ def test_credential_after_keyword_still_redacts():
     assert found == ["named secret field"]
 
 
+# ─── Public endpoint URLs (a credential-named field holding a bare URL) ───────
+
+# A Slack webhook URL embeds its secret in the path; its final segment is a
+# 24-char opaque token mixing letters and digits. Assembled at runtime (like
+# STRIPE_LIVE/AWS_KEY above) so the whole webhook literal never appears in the
+# source and trips GitHub push protection.
+_SLACK_WEBHOOK = (
+    "https://hooks.slack.com/services/"
+    + "T00000000/B00000000/"
+    + "aB3xK9mN2pQ7rT4wY1cV5bZ8"
+)
+
+
+@pytest.mark.parametrize(
+    "label, value, expected",
+    [
+        ("google oauth token endpoint", "https://oauth2.googleapis.com/token", True),
+        (
+            "azure authorize endpoint",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            True,
+        ),
+        ("openai completions endpoint", "https://api.openai.com/v1/completions", True),
+        (
+            "hyphen-joined dated path (no opaque run)",
+            "https://example.com/hooks/report-2024-01-15-final-summary",
+            True,
+        ),
+        ("slack webhook with token path", _SLACK_WEBHOOK, False),
+        (
+            "userinfo password in authority",
+            "https://user:s3cr3tpassw0rd@example.com/api",
+            False,
+        ),
+        (
+            "opaque token in query",
+            "https://example.com/cb?access=aB3xK9mN2pQ7rT4wY1cV5bZ8",
+            False,
+        ),
+        ("not a url", "aB3xK9mN2pQ7rT4wY1cV5bZ8dF0gH6jL", False),
+        ("url with trailing junk is not fullmatch", "not-a-url-just-text-here", False),
+    ],
+)
+def test_is_public_endpoint_url(label, value, expected):
+    assert E._is_public_endpoint_url(value) is expected, label
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["token_url", "access_token_url", "secret_endpoint", "auth_url"],
+)
+def test_public_endpoint_url_skipped_after_keyword(field):
+    # A public endpoint under a credential-named field is NOT a secret; skip it
+    # on BOTH local and web ingress (a clean URL smuggles no credential).
+    text = f"{field} = https://oauth2.googleapis.com/token"
+    for web in (False, True):
+        out, found = redact(text, cfg(web_ingress=web))
+        assert out == text, (field, web)
+        assert found == [], (field, web)
+
+
+# A URL embedding a token/password IS a secret and must still redact — whether
+# the field-value regex catches it or a structural detector (Slack/BasicAuth)
+# does first. The carve-out must not let the embedded secret survive.
+@pytest.mark.parametrize(
+    "label, text, needle",
+    [
+        (
+            "slack webhook token path",
+            f"webhook_url = {_SLACK_WEBHOOK}",
+            "aB3xK9mN2pQ7rT4wY1cV5bZ8",
+        ),
+        (
+            "userinfo password",
+            "auth_url = https://user:s3cr3tpassw0rd@example.com/api",
+            "s3cr3tpassw0rd",
+        ),
+    ],
+)
+def test_secret_bearing_url_still_redacted(label, text, needle):
+    assert E._is_public_endpoint_url(text.split(" = ", 1)[1]) is False, label
+    for web in (False, True):
+        out, found = redact(text, cfg(web_ingress=web))
+        assert needle not in out, (label, web)
+        assert found, (label, web)
+
+
 # ─── Web-ingress disables relabelable skips ──────────────────────────────────
 
 

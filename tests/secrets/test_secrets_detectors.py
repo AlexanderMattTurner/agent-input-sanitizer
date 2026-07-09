@@ -53,6 +53,24 @@ def test_jwt_rejects_non_json_header_or_payload(token):
     assert not list(detector.analyze_string(token))
 
 
+def test_jwt_with_x5c_cert_chain_header_is_redacted():
+    """A JWT whose header carries an x5c certificate CHAIN (RFC 7515) runs the
+    header segment well past the old 8192-char per-segment bound; the bounded
+    quantifier must clear a multi-cert header or the whole token leaks."""
+    import base64
+
+    # A valid base64url-JSON header whose encoded length exceeds 8192 chars — a
+    # realistic x5c chain is several base64 DER certs.
+    header = {"alg": "RS256", "typ": "JWT", "x5c": ["M" * 7000]}
+    encoded_header = (
+        base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b"=").decode()
+    )
+    assert len(encoded_header) > 8192
+    token = f"{encoded_header}.{_JWT_PAYLOAD}.{'A' * 43}"
+    detector = D.JwtFullTokenDetector()
+    assert list(detector.analyze_string(token)), "x5c-header JWT leaked in cleartext"
+
+
 def test_custom_detectors_defined():
     anthropic = D.AnthropicApiKeyDetector
     google = D.GoogleApiKeyDetector

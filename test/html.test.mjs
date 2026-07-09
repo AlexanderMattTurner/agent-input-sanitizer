@@ -85,6 +85,17 @@ const HIDDEN_STYLE_CASES = [
   ["position:absolute;left:-100vw", true], // a full viewport-width fully clears the screen
   ["position:absolute;left:-100%", true],
   ["clip:rect(0,0,0,0);position:absolute", true],
+  // clip: rect(top,right,bottom,left) hides only when the window collapses to
+  // ~zero AREA (width right-left or height bottom-top near zero) — parsing all
+  // four edges, not just the first (bug: `rect(0,…)` spliced a visible window).
+  ["clip:rect(0px,100px,100px,0px);position:absolute", false], // 100x100 visible window
+  ["position:absolute;clip:rect(1,1,1,1)", true], // degenerate 0x0 window (the sr-only clip hack)
+  ["position:absolute;clip:rect(10px,10px,20px,10px)", true], // right==left → zero width
+  ["position:absolute;clip:rect(0px,50px,0px,0px)", true], // bottom==top → zero height
+  ["position:absolute;clip:rect(auto,auto,auto,auto)", false], // auto edges unresolvable — fail open
+  ["position:absolute;clip:rect(0px,5em,1em,0px)", false], // mismatched-unit pairs — fail open
+  ["position:absolute;clip:rect(0,0,0)", false], // only 3 edges — malformed, fail open
+  ["position:absolute;clip:auto", false], // truthy clip with no rect() — fail open (isClipRectHidden !rect)
   ["position:absolute;left:10px", false],
   ["position:absolute;left:-900px", false],
   ["position:absolute;left:-10px", false],
@@ -98,7 +109,6 @@ const HIDDEN_STYLE_CASES = [
   ["position:absolute;left:calc(100% - 5px)", false], // ordinary in-flow calc must not splice
   ["position:static;left:-9999px", false],
   ["position:absolute;left:auto", false], // non-length offset is not offscreen
-  ["position:absolute;clip:rect(1,1,1,1)", false],
   ["position:absolute;left:-1000", false], // unitless nonzero length is INVALID CSS; browser drops it, fails open
   ["position:absolute;left:-9999", false], // same, larger magnitude
   // ── text-indent offscreen ──
@@ -152,6 +162,15 @@ const HIDDEN_STYLE_CASES = [
   ["transform:translate(0,0)", false], // neither axis shifts
   ["transform:translate(5px,-10px)", false], // small two-axis shift stays on screen
   ["transform:translatex(-50vw)", false], // half-shift stays partly visible (precision)
+  // A `%` translate is relative to the element's OWN size, not the viewport, so
+  // it can't be judged offscreen without layout — fail OPEN (bug: `%` was read
+  // as a viewport unit and spliced a right-aligned popover).
+  ["transform:translateX(-100%)", false], // element-relative %, not offscreen
+  ["transform:translateY(-100%)", false],
+  ["transform:translate(-100%,0)", false],
+  ["transform:translate(0,-999%)", false], // large % is still element-relative
+  ["transform:translateX()", false], // empty translate arg — isOffscreenTranslate !value early return
+  ["position:absolute;left:100%;transform:translateX(-100%)", false], // right-aligned popover, on screen
   ["transform:scale(0.5)", false],
   ["transform:scale(0.8)", false], // mild shrink stays readable
   ["transform:translatex(5px)", false],
@@ -206,6 +225,12 @@ const HIDDEN_STYLE_CASES = [
   ["color:transparent;background-clip:text", false],
   ["color:transparent;-webkit-text-fill-color:#111", false], // fill color overrides transparent
   ["color:transparent;-webkit-text-fill-color:transparent", true], // fill also transparent — still hidden
+  // ── -webkit-text-stroke paints a visible outline despite transparent fill ──
+  ["color:transparent;-webkit-text-stroke:1px black", false], // outlined glyphs are visible
+  ["color:transparent;-webkit-text-stroke:2px #111", false], // hex stroke color, visible
+  ["color:transparent;-webkit-text-stroke-color:black", false], // longhand stroke color
+  ["color:transparent;-webkit-text-stroke:1px transparent", true], // stroke also transparent — still hidden
+  ["color:transparent;-webkit-text-stroke:1px", true], // width only (currentColor=transparent) — still hidden
   // ── unresolved color tokens: can't prove same-color, so fail open ──
   ["color:var(--fg);background-color:var(--fg)", false], // same var, but resolves via cascade — not provably equal
   ["color:inherit;background:inherit", false], // inherit color != inherit background-color
@@ -240,6 +265,13 @@ const HIDDEN_STYLE_CASES = [
   ["display:\\64 isplay-never-a-real-value", false], // decodes to a nonsense keyword, stays visible
   ["display:\\62 lock", false], // `\62` decodes to 'b' -> "block", correctly visible after decode
   ["visibility:hi\\64 den", true], // `\64` decodes to 'd' -> "hidden"
+  // `!important` is stripped AFTER escape-decoding, so an escaped spelling of the
+  // flag is caught (bug: raw-stripping missed `!\69mportant`, leaving the value
+  // `none!important` != `none`, so hidden content leaked).
+  ["display:none!\\69mportant", true], // `\69` -> 'i' -> "none!important" -> stripped -> "none"
+  ["display:none !\\69mportant", true], // with a space before the escaped flag
+  ["display:block!\\69mportant", false], // decodes to "block!important" -> stripped -> "block", visible
+  ["visibility:hi\\64 den!important", true], // escaped value AND a plain important flag
   // ── invalid escaped codepoints (spec: decode to U+FFFD, never throw) ──
   ["display:\\0", false], // codepoint 0 is invalid
   ["display:\\d800", false], // a surrogate half is invalid
