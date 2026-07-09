@@ -83,6 +83,7 @@ const HIDDEN_STYLE_CASES = [
   ['x;content:"a\\b;c"', false],
   ["x;font-family:'a;b'", false], // single-quoted value: `;` inside is not a separator
   ["x;background:url(a;b)", false], // `;` inside url()/parens is not a separator
+  ["x;background:url(a;display:none;b)", false], // display:none inside url() is NOT a real decl
   ["x;a:b)c", false], // an unbalanced `)` at top level must not underflow the depth
   // ── zero / near-zero size (epsilon) ──
   // `height`/`width` alone (no `overflow:hidden`) are deliberately NOT
