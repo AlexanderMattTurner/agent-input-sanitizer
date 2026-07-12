@@ -247,15 +247,21 @@ function processLayer1(text, sgrCarveOut) {
 
 /**
  * Layers 2+3: HTML sanitisation (`html`) and exfil-URL detection (`exfilScan`).
+ * `reveal` is the pre-splice text, returned only when Layer 2 removed bytes, so a
+ * caller can stash it for later inspection of what the splice hid (the model
+ * cannot otherwise tell a benign `<!-- TODO -->` from an injection payload). The
+ * transform itself stays pure — the caller owns any persistence.
  * @param {string} inputText
  * @param {{ html?: boolean, exfilScan?: boolean }} options
- * @returns {Promise<{ cleaned: string, warnings: string[], modified: boolean }>}
+ * @returns {Promise<{ cleaned: string, warnings: string[], modified: boolean, reveal?: string }>}
  */
 async function applyMarkdownPipeline(inputText, { html, exfilScan }) {
   /** @type {string[]} */
   const warnings = [];
   let modified = false;
   let cleaned = inputText;
+  /** @type {string | undefined} */
+  let reveal;
   if ((!html && !exfilScan) || !needsMarkdownPipeline(cleaned))
     return { cleaned, warnings, modified };
   const { sanitizeHtml, detectExfil } = await import("./html.mjs");
@@ -265,6 +271,7 @@ async function applyMarkdownPipeline(inputText, { html, exfilScan }) {
     const layer2 = sanitizeHtml(cleaned);
     if (layer2) {
       if (layer2.text !== cleaned) {
+        reveal = cleaned;
         cleaned = layer2.text;
         modified = true;
         warnings.push(
@@ -295,7 +302,7 @@ async function applyMarkdownPipeline(inputText, { html, exfilScan }) {
       );
     }
   }
-  return { cleaned, warnings, modified };
+  return { cleaned, warnings, modified, reveal };
 }
 
 /**
@@ -315,9 +322,12 @@ async function applyMarkdownPipeline(inputText, { html, exfilScan }) {
  * output rather than emitting an unvetted value. That fail-closed behavior
  * also applies to Layer 4's re-scan after a Layer-5 span deletion (see Layer
  * 5, below) — a redactor failure there fails the whole call closed too.
+ * `reveal` is the pre-Layer-2 text, present only when the HTML splice removed
+ * bytes, so a caller can persist what was hidden for later inspection (see
+ * {@link applyMarkdownPipeline}); the field is omitted otherwise.
  * @param {string} text
  * @param {SanitizeTextOptions} [options]
- * @returns {Promise<{ cleaned: string, warnings: string[], modified: boolean, sgrNote: boolean }>}
+ * @returns {Promise<{ cleaned: string, warnings: string[], modified: boolean, sgrNote: boolean, reveal?: string }>}
  */
 export async function sanitizeText(text, options = {}) {
   const { redact, filterInjection, sgrCarveOut = false } = options;
@@ -343,6 +353,7 @@ export async function sanitizeText(text, options = {}) {
     sgrNote = false;
   }
   warnings.push(...mdResult.warnings);
+  const reveal = mdResult.reveal;
 
   // Layer 4 — fail closed: a redactor we couldn't run might let a secret
   // through, so rethrow and let the caller replace the output with a
@@ -401,7 +412,15 @@ export async function sanitizeText(text, options = {}) {
     }
   }
 
-  return { cleaned, warnings, modified, sgrNote };
+  // Omit `reveal` unless Layer 2 spliced, so the common-case result shape stays
+  // minimal (callers gate on its presence).
+  return {
+    cleaned,
+    warnings,
+    modified,
+    sgrNote,
+    ...(reveal !== undefined && { reveal }),
+  };
 }
 
 /**
@@ -449,13 +468,27 @@ const CYCLE_PLACEHOLDER = "[withheld: circular reference in structured output]";
  * nesting past {@link MAX_DEPTH}, and a reference cycle. Either replaces the
  * offending subtree with a placeholder string + a warning, never passing the
  * raw subtree through. Keys are also screened for hidden chars (see below).
+ *
+ * `reveals` accumulates each string leaf's pre-Layer-2 text (present only when
+ * the HTML splice removed bytes) so a caller can persist what was hidden — the
+ * structured-output analogue of {@link sanitizeText}'s `reveal`. Same
+ * mutated-accumulator contract as `warnings`.
  * @param {any} value
  * @param {SanitizeTextOptions} options
  * @param {string[]} warnings
+ * @param {string[]} [reveals]
  * @returns {Promise<{ value: any, modified: boolean, sgrNote: boolean }>}
  */
-export async function sanitizeValue(value, options, warnings) {
-  return sanitizeValueAt(value, options, warnings, 0, new WeakSet(), new Map());
+export async function sanitizeValue(value, options, warnings, reveals = []) {
+  return sanitizeValueAt(
+    value,
+    options,
+    warnings,
+    reveals,
+    0,
+    new WeakSet(),
+    new Map(),
+  );
 }
 
 /**
@@ -467,6 +500,7 @@ export async function sanitizeValue(value, options, warnings) {
  * @param {any} value
  * @param {SanitizeTextOptions} options
  * @param {string[]} warnings
+ * @param {string[]} reveals  accumulates each string leaf's pre-Layer-2 text
  * @param {number} depth
  * @param {WeakSet<object>} seen
  * @param {Map<object, { value: any, modified: boolean, sgrNote: boolean }>} memo
@@ -478,13 +512,24 @@ export async function sanitizeValue(value, options, warnings) {
  *   subtrees are cached; the depth/cycle placeholders are path-dependent and
  *   deliberately NOT cached (a node withheld for depth on a long path must still
  *   be walked on a shorter one). Because warnings dedup in composeContext,
- *   skipping a cached node's duplicate warnings is harmless.
+ *   skipping a cached node's duplicate warnings is harmless. A cached node's
+ *   `reveals` are likewise not re-emitted, harmless for the same reason (the
+ *   caller dedups reveals by content).
  * @returns {Promise<{ value: any, modified: boolean, sgrNote: boolean }>}
  */
-async function sanitizeValueAt(value, options, warnings, depth, seen, memo) {
+async function sanitizeValueAt(
+  value,
+  options,
+  warnings,
+  reveals,
+  depth,
+  seen,
+  memo,
+) {
   if (typeof value === "string") {
     const result = await sanitizeText(value, options);
     warnings.push(...result.warnings);
+    if (result.reveal !== undefined) reveals.push(result.reveal);
     return {
       value: result.cleaned,
       modified: result.modified,
@@ -568,6 +613,7 @@ async function sanitizeValueAt(value, options, warnings, depth, seen, memo) {
           item,
           options,
           warnings,
+          reveals,
           depth + 1,
           seen,
           memo,
@@ -602,6 +648,7 @@ async function sanitizeValueAt(value, options, warnings, depth, seen, memo) {
         item,
         options,
         warnings,
+        reveals,
         depth + 1,
         seen,
         memo,
