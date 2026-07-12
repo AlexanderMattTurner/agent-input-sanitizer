@@ -369,6 +369,28 @@ describe("sanitizeText: Layer 2/3 markdown pipeline gating", () => {
     assert.equal(r.modified, false);
     assert.deepEqual(r.warnings, []);
   });
+
+  it("returns the pre-splice text as `reveal` when Layer 2 removes bytes", async () => {
+    const input = "intro <!-- secret --> tail";
+    const r = await sanitizeText(input, { html: true });
+    assert.equal(r.cleaned, "intro [HTML comment removed] tail");
+    // The reveal is the text as it stood BEFORE the splice — the removed
+    // comment intact — so a caller can persist what the model no longer sees.
+    assert.equal(r.reveal, input);
+  });
+
+  it("omits `reveal` when Layer 2 runs but removes nothing (warn-only)", async () => {
+    // A preserved <script> is reported but not spliced, so there is no pre-splice
+    // text to reveal; the field must be absent, not an empty string.
+    const r = await sanitizeText("a <script>x()</script> b", { html: true });
+    assert.equal(r.modified, false);
+    assert.ok(!("reveal" in r));
+  });
+
+  it("omits `reveal` when the HTML pipeline never runs", async () => {
+    const r = await sanitizeText("intro <!-- hidden --> tail");
+    assert.ok(!("reveal" in r));
+  });
 });
 
 // ─── Layer 4 (injected redactor) ─────────────────────────────────────────────
@@ -695,6 +717,33 @@ describe("sanitizeValue", () => {
     const r = await sanitizeValue([`mal${ZW}ware`, "clean"], {}, warnings);
     assert.deepEqual(r.value, ["malware", "clean"]);
     assert.equal(r.modified, true);
+  });
+
+  it("accumulates each spliced string leaf's pre-Layer-2 reveal", async () => {
+    const warnings = [];
+    const reveals = [];
+    const r = await sanitizeValue(
+      { a: "one <!-- x --> two", b: "clean", c: ["nested <!-- y --> end"] },
+      { html: true },
+      warnings,
+      reveals,
+    );
+    assert.equal(r.value.a, "one [HTML comment removed] two");
+    assert.equal(r.value.c[0], "nested [HTML comment removed] end");
+    assert.equal(r.modified, true);
+    // Both spliced leaves surface their pre-splice text; the clean leaf adds none.
+    assert.deepEqual(reveals, ["one <!-- x --> two", "nested <!-- y --> end"]);
+  });
+
+  it("adds no reveal when a leaf is not spliced", async () => {
+    const reveals = [];
+    await sanitizeValue(
+      { a: `mal${ZW}ware`, b: 7 },
+      { html: true },
+      [],
+      reveals,
+    );
+    assert.deepEqual(reveals, []);
   });
 
   it("recurses into a nested object, preserving the shape and non-strings", async () => {
