@@ -90,41 +90,79 @@ max_version() {
   printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1
 }
 
-# Get the latest published version from npm (source of truth). Distinguish a
-# genuinely-unpublished package (npm error `E404` -> treat as 0.0.0, a first
-# release) from a transient registry/network failure. A blanket
+# The release base is the highest NON-DEPRECATED published version — NOT
+# `npm view <pkg> version`, which returns only the `latest` dist-tag. `latest` can
+# lag far behind the highest published version (a mis-set tag, or a line published
+# faster than the tag advanced); bumping from a lagging `latest` computes a version
+# that is already published, and the publish-conflict guard below then treats that
+# as success and skips — so every release silently no-ops on the same taken version
+# forever. `npm view <pkg> versions --json` is a bare string ARRAY carrying no
+# deprecation flag, so we walk candidates high-to-low and probe each with
+# `npm view <pkg>@<v> deprecated` until one is not deprecated: that first live
+# version is the base, so a retired (deprecated) higher release can never become
+# it. Distinguish a genuinely-unpublished package (npm error `E404` -> treat as
+# 0.0.0, a first release) from a transient registry/network failure: a blanket
 # `|| echo "0.0.0"` would silently rebase the version to 0.0.1 on any outage and
 # repoint the `latest` dist-tag downward, so anything other than E404 fails loud.
 PACKAGE_NAME=$(node -p "require('./package.json').name")
 NPM_VIEW_RC=0
-# Capture stdout and stderr SEPARATELY. npm prints the version to stdout but
+# Capture stdout and stderr SEPARATELY. npm prints the JSON array to stdout but
 # routes warnings (e.g. "Unknown project config" for pnpm-only .npmrc keys like
-# confirm-modules-purge) and the E404 "not published" error to stderr. Folding
-# them together with `2>&1` let a warning land as the first line of the captured
-# output, so the `head -n1` below parsed the warning as the version and the
-# semver guard rejected it. Keep stdout clean for parsing; read E404 off stderr.
+# confirm-modules-purge) and the E404 "not published" error to stderr; folding
+# them with `2>&1` would corrupt the JSON parse. Keep stdout clean for parsing;
+# read E404 off stderr.
 NPM_VIEW_ERR=$(mktemp)
 trap 'rm -f "$NPM_VIEW_ERR"' EXIT
-NPM_VIEW_OUTPUT=$(npm view "$PACKAGE_NAME" version 2>"$NPM_VIEW_ERR") || NPM_VIEW_RC=$?
-if [[ "$NPM_VIEW_RC" -eq 0 ]]; then
-  CURRENT_VERSION="$NPM_VIEW_OUTPUT"
-elif grep -q "E404" "$NPM_VIEW_ERR"; then
-  CURRENT_VERSION="0.0.0"
+VERSIONS_JSON=$(npm view "$PACKAGE_NAME" versions --json 2>"$NPM_VIEW_ERR") || NPM_VIEW_RC=$?
+if [[ "$NPM_VIEW_RC" -ne 0 ]]; then
+  if grep -q "E404" "$NPM_VIEW_ERR"; then
+    CURRENT_VERSION="0.0.0" # unpublished — first release
+  else
+    log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $(cat "$NPM_VIEW_ERR")"
+    exit 1
+  fi
 else
-  log "Error: npm view failed unexpectedly (not E404). Refusing to guess a version: $(cat "$NPM_VIEW_ERR")"
-  exit 1
+  # Stable X.Y.Z versions, highest first. `npm view versions --json` is a single
+  # string when only one version exists, so normalize to an array; the strict
+  # X.Y.Z filter drops prereleases so the arithmetic bump below can't misfire.
+  CANDIDATES=$(printf '%s' "$VERSIONS_JSON" | node -e '
+    const raw = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    const all = Array.isArray(raw) ? raw : [raw];
+    const cmp = (a, b) => {
+      const A = a.split(".").map(Number);
+      const B = b.split(".").map(Number);
+      return A[0] - B[0] || A[1] - B[1] || A[2] - B[2];
+    };
+    const stable = all
+      .filter((v) => /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v))
+      .sort(cmp)
+      .reverse();
+    process.stdout.write(stable.join("\n"));
+  ') || {
+    log "Error: could not parse the published version list. Refusing to guess a version."
+    exit 1
+  }
+  CURRENT_VERSION=""
+  while IFS= read -r candidate; do
+    [[ -z "$candidate" ]] && continue
+    # `npm view <pkg>@<v> deprecated` prints the deprecation string for a retired
+    # version and nothing for a live one, so an empty result is "not deprecated".
+    if [[ -z "$(npm view "$PACKAGE_NAME@$candidate" deprecated 2>/dev/null)" ]]; then
+      CURRENT_VERSION="$candidate"
+      break
+    fi
+    log "Skipping deprecated published version $candidate when choosing the release base."
+  done <<<"$CANDIDATES"
+  if [[ -z "$CURRENT_VERSION" ]]; then
+    log "Error: no live (non-deprecated) published version found. Refusing to guess a base."
+    exit 1
+  fi
 fi
-# `npm view` can print nothing on a success exit (never-published package) or
-# emit a prerelease like `1.2.3-beta.0`; take the first line and require strict
-# X.Y.Z so the arithmetic bump below can't silently misfire. Empty -> 0.0.0
-# (first release); any other non-semver value fails loudly.
-CURRENT_VERSION=$(printf '%s\n' "$CURRENT_VERSION" | head -n1)
-[[ -z "$CURRENT_VERSION" ]] && CURRENT_VERSION="0.0.0"
 if ! [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  log "Error: npm returned a non-semver current version: '$CURRENT_VERSION'. Refusing to guess a bump."
+  log "Error: computed a non-semver current version: '$CURRENT_VERSION'. Refusing to guess a bump."
   exit 1
 fi
-log "Current npm version: $CURRENT_VERSION"
+log "Highest live npm version: $CURRENT_VERSION"
 
 # Find the latest version tag to determine which commits to analyze
 LAST_TAG=$(git describe --tags --match "v*" --abbrev=0 HEAD 2>/dev/null || echo "")
