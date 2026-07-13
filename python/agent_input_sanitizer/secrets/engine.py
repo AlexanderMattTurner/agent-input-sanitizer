@@ -316,6 +316,31 @@ def _is_benign_cursor(m: re.Match[str]) -> bool:
 _PLACEHOLDER_LITERALS = frozenset(
     {"example", "changeme", "change-me", "placeholder", "redacted", "dummy"}
 )
+# A value that is itself a bare credential-noun keyword — `secret = "secret"`,
+# `"password": "password"`, `token: token` — is a label/placeholder, never a real
+# credential: no issuer emits the single dictionary word "secret" as a key, and a
+# generated key mixes case and digits. KeywordDetector fires on this
+# keyword=keyword shape and redacts the noun, corrupting docs/config/test output
+# for no security gain. These carry no entropy, so skipping them can hide no
+# secret. These are the generic credential nouns (the `_FIELD_NAMES` family) that
+# appear as a stand-in value; the check lowercases the value.
+_KEYWORD_NOUN_LITERALS = frozenset(
+    {
+        "secret",
+        "secrets",
+        "secretkey",
+        "password",
+        "passwd",
+        "passphrase",
+        "token",
+        "key",
+        "apikey",
+        "credential",
+        "credentials",
+        "auth",
+        "bearer",
+    }
+)
 # Leading (?<![A-Z_]) prevents recheck from flagging the nested quantifiers as
 # polynomial backtracking. The lookbehind is always satisfied at the fullmatch
 # start position (no preceding char) and after each \s+ separator (space is not
@@ -334,6 +359,7 @@ def _is_placeholder_value(value: str) -> bool:
     return (
         _PLACEHOLDER_RE.fullmatch(value) is not None
         or value.lower() in _PLACEHOLDER_LITERALS
+        or value.lower() in _KEYWORD_NOUN_LITERALS
     )
 
 

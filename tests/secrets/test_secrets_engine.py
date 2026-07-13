@@ -513,6 +513,12 @@ def test_credential_token_still_redacted(label, text, expected):
         ("repeated zeros", "00000000", True),
         ("known literal", "changeme", True),
         ("known literal cased", "ChangeMe", True),
+        ("keyword noun secret", "secret", True),
+        ("keyword noun cased", "SECRET", True),
+        ("keyword noun password", "password", True),
+        ("keyword noun token", "token", True),
+        ("keyword noun apikey", "apikey", True),
+        ("keyword noun prefix of longer word", "secretariat", False),
         ("high entropy mixed", "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e", False),
         ("caps with digits", "AKIAIOSFODNN7EXAMPLE", False),
         ("digit-bearing metavariable", "API_KEY_2_q9X2mN7pK4rT8wY1c", False),
@@ -537,6 +543,10 @@ def test_is_placeholder_value(label, value, expected):
         ("repeated filler", "password: xxxxxxxxxxxxxxxxxxxxxxxx"),
         ("ci template", 'token: "{{ secrets.DEPLOY_TOKEN }}"'),
         ("known literal", 'password = "changeme"'),
+        ("keyword noun as value", '"secret": "secret"'),
+        ("keyword noun cased", 'secret: "SECRET"'),
+        ("password noun as value", 'password: "password"'),
+        ("token noun as value", 'token: "token"'),
     ],
 )
 def test_placeholder_values_not_redacted(label, text):
