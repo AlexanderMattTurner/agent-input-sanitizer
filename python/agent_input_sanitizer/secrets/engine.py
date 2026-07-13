@@ -386,17 +386,18 @@ _PLACEHOLDER_RE = re.compile(
 # (a generated key mixes case and digits). The distinguishing token is REQUIRED:
 # without it a genuine lowercase diceware passphrase (`correct-horse-battery-
 # staple`) is indistinguishable from prose, and it IS a real credential — so a
-# bare lowercase word run is NOT skipped, only one naming itself a placeholder.
+# bare lowercase word run is NOT skipped, only one carrying a strong
+# instruction/possessive token (your/paste/replace/…).
+# Kept to strong instruction/possessive/placeholder words. Short common words
+# (`my`, `here`, `goes`, `enter`) are deliberately excluded: they occur in
+# random diceware wordlists, so skipping a value that contains one could leak a
+# real passphrase — the false negative that matters most here.
 _METAVARIABLE_TOKENS = frozenset(
     {
         "your",
-        "my",
         "paste",
         "insert",
         "replace",
-        "enter",
-        "goes",
-        "here",
         "example",
         "sample",
         "placeholder",
