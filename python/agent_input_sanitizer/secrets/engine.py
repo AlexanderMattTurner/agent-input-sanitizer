@@ -314,7 +314,31 @@ def _is_benign_cursor(m: re.Match[str]) -> bool:
 # stay redacted. Applied only to keyword-anchored detections; prefix detectors
 # (AWS/Stripe/…), whose match *is* the credential shape, are never skipped.
 _PLACEHOLDER_LITERALS = frozenset(
-    {"example", "changeme", "change-me", "placeholder", "redacted", "dummy"}
+    {
+        "example",
+        "changeme",
+        "change-me",
+        "placeholder",
+        "redacted",
+        "dummy",
+        # Documentation / fixture sentinels — a value that is one of these
+        # well-known stand-ins (`secret: "test"`, `api_key: "sample"`,
+        # `password: "none"`, `token: "todo"`) is example/placeholder text, never
+        # a real credential. Like the nouns below they carry no entropy, so
+        # skipping them hides nothing; a real key mixes case and digits and never
+        # collapses to one of these words.
+        "test",
+        "testing",
+        "sample",
+        "todo",
+        "tbd",
+        "none",
+        "nil",
+        "n/a",
+        "foo",
+        "bar",
+        "baz",
+    }
 )
 # A value that is itself a bare credential-noun keyword — `secret = "secret"`,
 # `"password": "password"`, `token: token` — is a label/placeholder, never a real
