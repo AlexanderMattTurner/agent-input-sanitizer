@@ -378,12 +378,54 @@ _PLACEHOLDER_RE = re.compile(
 )
 
 
+# A lowercase hyphen/underscore/space-joined word run that carries an imperative
+# or possessive metavariable token (`your-api-key-here`, `paste-your-token-here`,
+# `replace-with-real-secret`, `example-api-key`) is fill-in-the-blank prose, not a
+# credential. `_PLACEHOLDER_RE` already catches the CAPS (`YOUR_API_KEY`) and
+# angle/template forms; this is their lowercase twin, which a real key can't take
+# (a generated key mixes case and digits). The distinguishing token is REQUIRED:
+# without it a genuine lowercase diceware passphrase (`correct-horse-battery-
+# staple`) is indistinguishable from prose, and it IS a real credential — so a
+# bare lowercase word run is NOT skipped, only one naming itself a placeholder.
+_METAVARIABLE_TOKENS = frozenset(
+    {
+        "your",
+        "my",
+        "paste",
+        "insert",
+        "replace",
+        "enter",
+        "goes",
+        "here",
+        "example",
+        "sample",
+        "placeholder",
+        "changeme",
+    }
+)
+# Two-or-more lowercase-alnum words joined by -/_/space. Disjoint separator and
+# body classes so each segment parses exactly one way (linear, no ReDoS).
+_LOWER_WORD_RUN_RE = re.compile(r"[a-z0-9]+(?:[-_ ][a-z0-9]+)+")
+
+
+def _is_lowercase_metavariable(value: str) -> bool:
+    """True when the value is a lowercase word run naming itself a placeholder.
+
+    An opaque high-entropy segment (`your-key-here-deadbeef0123456789abcd`) is a
+    smuggled secret wearing a placeholder token, so a value carrying a >=20-char
+    letter+digit run is never treated as a metavariable."""
+    if _LOWER_WORD_RUN_RE.fullmatch(value) is None or _has_opaque_run(value):
+        return False
+    return bool(_METAVARIABLE_TOKENS.intersection(re.split(r"[-_ ]", value)))
+
+
 def _is_placeholder_value(value: str) -> bool:
     """True when the value is a documentation placeholder, not a credential."""
     return (
         _PLACEHOLDER_RE.fullmatch(value) is not None
         or value.lower() in _PLACEHOLDER_LITERALS
         or value.lower() in _KEYWORD_NOUN_LITERALS
+        or _is_lowercase_metavariable(value)
     )
 
 
@@ -554,6 +596,41 @@ def _is_uuid(value: str) -> bool:
     return _UUID_RE.fullmatch(value) is not None
 
 
+# An ISO-8601 date or timestamp (`2024-01-15`, `2024-01-15T10:30:00.000000Z`,
+# `2024-01-15 10:30:00+02:00`) is public data — but a `token_created` /
+# `secret_updated` / `access_token_expiry` field trips the keyword and redacts the
+# timestamp. No credential takes the `YYYY-MM-DD` shape, so skipping it hides
+# nothing. Digit runs are fixed-length, so the pattern is linear. A trailing tag
+# (`…Z-batch01`) is deliberately NOT absorbed — a strict shape can't be a cover
+# for appended secret bytes.
+_ISO8601_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"  # date
+    r"(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?)?"  # time+tz
+)
+
+
+def _is_timestamp(value: str) -> bool:
+    """True when the value is an ISO-8601 date/timestamp, not a credential."""
+    return _ISO8601_RE.fullmatch(value) is not None
+
+
+# A dotted version / semver string (`1.2.3`, `v2.0.1`, `1.2.3-alpha.build.abcdef`)
+# is public metadata — but a `secret_version` / `token_api_version` field trips the
+# keyword and redacts it. The `\d+\.\d+\.\d+` numeric core is a shape no issuer
+# uses for a key. The optional pre-release/build tail is a single character class
+# (linear, no ReDoS); a real key does not begin `1.2.3-`.
+_VERSION_RE = re.compile(r"v?\d+\.\d+(?:\.\d+)+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?")
+
+
+def _is_version(value: str) -> bool:
+    """True when the value is a dotted version / semver string, not a credential.
+
+    A pre-release/build tail can otherwise absorb a smuggled secret
+    (`1.2.3-q9X2mN7pK4rT8wY1cV5bZ3`), so a value carrying a >=20-char letter+digit
+    run is never treated as a version."""
+    return _VERSION_RE.fullmatch(value) is not None and not _has_opaque_run(value)
+
+
 # detect-secrets' PrivateKeyDetector only matches the "-----BEGIN-----" header
 # line, so a per-line scan leaves the base64 body unredacted. Match and collapse
 # the whole PEM block. To FAIL SAFE on truncated output the body also terminates
@@ -710,15 +787,17 @@ def _is_benign_keyword_match(
         return False
     if not secret.secret_value:
         return False
-    if _is_placeholder_value(secret.secret_value) or _is_env_reference(
-        secret.secret_value, web_ingress
+    value = secret.secret_value
+    if (
+        _is_placeholder_value(value)
+        or _is_env_reference(value, web_ingress)
+        or _is_timestamp(value)
+        or _is_version(value)
     ):
         return True
     if web_ingress:
         return False
-    return _is_metadata_field(line, secret.secret_value) or _is_markdown_code_prose(
-        secret.secret_value
-    )
+    return _is_metadata_field(line, value) or _is_markdown_code_prose(value)
 
 
 def _redact_line(
@@ -824,8 +903,8 @@ def _redact_core(
     def _replace_field(m: re.Match[str]) -> str:
         # Name-based skips (cursor / path / metadata field) are attacker-relabelable
         # on web ingress, so they only apply to local tool output; the value-shape
-        # skips (placeholder, content-digest, UUID, public endpoint URL) are
-        # trustworthy regardless of source and apply on web ingress too.
+        # skips (placeholder, content-digest, UUID, public endpoint URL, timestamp,
+        # version) are trustworthy regardless of source and apply on web ingress too.
         name_skip = not web_ingress and (
             _is_benign_cursor(m)
             or _is_filesystem_path(m)
@@ -843,6 +922,8 @@ def _redact_core(
             or _is_content_digest(value)
             or _is_uuid(value)
             or _is_public_endpoint_url(value)
+            or _is_timestamp(value)
+            or _is_version(value)
         ):
             return m.group(0)
         found.append("named secret field")
