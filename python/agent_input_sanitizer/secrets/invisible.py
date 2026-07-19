@@ -30,11 +30,20 @@ def default_charset() -> frozenset[int]:
 
 
 def strip_invisible(text: str, charset: frozenset[int] | None = None) -> str:
-    """Delete every code point of ``charset`` from ``text`` (deletion only — the
-    result is a subsequence of the input).
+    """DETECTION-NORMALIZATION ONLY: delete every code point of ``charset`` from
+    ``text`` UNCONDITIONALLY (deletion only — the result is a subsequence of the
+    input).
+
+    This is deliberately NOT JS-parity-safe for user-facing stripping. Unlike
+    ``src/invisible.mjs`` (which carves out legitimate joiners/selectors — ZWNJ,
+    ZWJ, variation selectors, tag characters — so it does not corrupt real text),
+    this drops the WHOLE charset with no carve-out, because the secrets engine
+    needs the most aggressive normalization to defeat invisible chars spliced into
+    a leaked key. Do NOT reuse it to sanitize text you will show a user; use the
+    JS deletion set (or a carve-out-aware variant) for that.
 
     ``charset`` defaults to :func:`default_charset` (the shared SSOT). Standalone
-    stripping only — the engine's detection pipeline calls
+    normalization only — the engine's detection pipeline calls
     :func:`strip_invisible_with_map` instead, since redaction must translate a
     match found in the stripped view back to the ORIGINAL text's offsets (this
     function throws that mapping away, which is fine for a caller that only wants
