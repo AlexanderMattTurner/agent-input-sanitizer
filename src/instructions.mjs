@@ -126,7 +126,31 @@ export function decodeRun(run) {
     };
   }
 
-  // Mixed/unknown
+  // Neither class holds a strict majority (e.g. a 50/50 tag + zero-width run),
+  // or the run mixes both classes without one dominating. Raw-dumping U+…
+  // codepoints here would bury BOTH payloads; instead decode each recognized
+  // sub-encoding and concatenate, keeping any unrecognized remainder visible as
+  // a `+ N other char(s)` note.
+  if (tagBytes.length > 0 || zwCount > 0) {
+    const parts = [];
+    if (tagBytes.length > 0)
+      parts.push(`${UNTRUSTED_PREFIX}"${neutralizeTagBytes(tagBytes)}"`);
+    if (zwCount > 0) {
+      const bits = cps
+        .filter((cp) => ZW_BIT.has(cp))
+        .map((cp) => ZW_BIT.get(cp))
+        .join("");
+      parts.push(`[${zwCount} zero-width chars: ${bits.slice(0, 80)}]`);
+    }
+    const otherCount = cps.length - tagBytes.length - zwCount;
+    const note = otherCount > 0 ? ` + ${otherCount} other char(s)` : "";
+    return {
+      method: "mixed tag + zero-width encodings",
+      decoded: parts.join(" ") + note,
+    };
+  }
+
+  // Unknown: no recognized sub-encoding present; report the raw code points.
   return {
     method: "invisible Unicode sequence",
     decoded: cps
@@ -140,7 +164,9 @@ export function decodeRun(run) {
  * run (with its decoded payload) plus a single scattered-chars finding when the
  * non-run invisible count crosses the threshold-evasion floor.
  * @param {string} content
- * @returns {Array<{ line: number, charCount: number, method: string, decoded: string }>}
+ * @returns {Array<{ line: number | null, charCount: number, method: string, decoded: string }>}
+ *   `line` is the 1-based line of a long-run finding, or `null` for the
+ *   whole-file scattered-chars finding (not tied to a single line).
  */
 export function scanText(content) {
   const findings = [];
@@ -178,7 +204,7 @@ export function scanText(content) {
   const scattered = countPayloadInvisible(content) - runChars;
   if (scattered >= SCATTERED_THRESHOLD) {
     findings.push({
-      line: 0,
+      line: null, // whole-file finding: scattered chars aren't tied to one line
       charCount: scattered,
       method: "scattered invisible chars (possible threshold evasion)",
       decoded: `[${scattered} invisible chars distributed across file]`,
@@ -393,8 +419,12 @@ export function atomicReplaceFile(
 
 /**
  * Strip payload-capable invisible characters from `absPath` in place. Returns
- * true when the file changed (it held a payload {@link scanText} flags), false
- * when {@link scanText} reports nothing.
+ * `true` when the file's bytes actually changed (a payload {@link scanText}
+ * flags was removed), `false` when {@link scanText} reports nothing, and `null`
+ * when scan flagged a payload but {@link stripInvisible} removes nothing — a
+ * fail-closed signal that the flagged run was PRESERVED (e.g. a well-formed
+ * emoji-tag sequence the stripper keeps), so the caller must not treat it as
+ * cleaned. `true` means and only means "bytes changed".
  *
  * Contract (scan/clean coherence): clean strips exactly what scan flags. A
  * write happens ONLY when `scanText` reports a finding, so the "scan, then
@@ -431,7 +461,7 @@ export function atomicReplaceFile(
  *   {@link atomicReplaceFile}'s `tmpName`): lets a test drive the concurrent
  *   write/symlink-swap that the TOCTOU guard exists to catch, which is otherwise
  *   unreachable from this fully-synchronous path. Defaults to `lstatSync`.
- * @returns {boolean}
+ * @returns {boolean | null}
  */
 export function cleanFile(absPath, lstat = lstatSync) {
   let fd;
@@ -472,12 +502,16 @@ export function cleanFile(absPath, lstat = lstatSync) {
 
     // Scan is the SSOT for what counts as a payload: don't rewrite a file scan
     // would not flag, even if stripInvisible would technically remove a char.
-    // A scan finding (a >=LONG_RUN_THRESHOLD run, or >=SCATTERED_THRESHOLD
-    // scattered chars) is past the carve-out's preserve window, so stripInvisible
-    // always removes at least one char here — stripped !== original is guaranteed.
     if (scanText(original).length === 0) return false;
 
     const stripped = stripInvisible(original);
+    // scanText can flag a run that stripInvisible PRESERVES — a well-formed but
+    // bogus emoji-tag run (a base pictograph + tag chars + CANCEL) trips the
+    // scanner yet is kept intact by the stripper. Rewriting identical bytes and
+    // returning `true` would falsely report the payload removed. Fail closed:
+    // the bytes did not change, so signal "flagged but not strippable" (null),
+    // never "cleaned" (true).
+    if (stripped === original) return null;
     // Re-verify the on-path file against the open-time snapshot before writing:
     // an inode/size/mtime change (or a swap to a symlink) means someone modified
     // it under us, so fail loud rather than clobber their write (lost update).
