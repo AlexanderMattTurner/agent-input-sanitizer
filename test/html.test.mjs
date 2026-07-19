@@ -101,6 +101,13 @@ const HIDDEN_STYLE_CASES = [
   ["font-size:11px", false],
   ["font-size:0.9em", false], // ordinary relative size
   ["font-size:14px", false],
+  // ── `font` SHORTHAND size (bug: only the font-size longhand was checked) ──
+  ["font:0px/1 serif", true], // size 0 via shorthand with line-height
+  ["font:0.005em/1 serif", true], // sub-epsilon shorthand size
+  ["font:italic bold 0px/1.4 Arial", true], // size token mid-shorthand
+  ["font:16px/1.5 serif", false], // ordinary size — visible
+  ["font:italic bold 14px Georgia", false], // no line-height, normal size
+  ["font:bold 100 12px sans-serif", false], // weight numbers are not the size token
   // ── positioned offscreen, any unit ──
   ["position:absolute;left:-9999px", true],
   ["position:fixed;top:-10000px", true],
@@ -133,6 +140,11 @@ const HIDDEN_STYLE_CASES = [
   ["position:absolute;left:calc(-100vw)", false], // unresolvable calc fails open (precision)
   ["position:absolute;left:calc(100% - 5px)", false], // ordinary in-flow calc must not splice
   ["position:static;left:-9999px", false],
+  // ── relative / sticky offscreen (bug: only absolute/fixed were gated) ──
+  ["position:relative;left:-9999px", true],
+  ["position:sticky;top:-10000px", true],
+  ["position:relative;left:-5px", false], // small relative nudge stays on screen
+  ["position:relative;clip:rect(1,1,1,1)", false], // `clip` ignores relative boxes — fail open
   ["position:absolute;left:auto", false], // non-length offset is not offscreen
   ["position:absolute;left:-1000", false], // unitless nonzero length is INVALID CSS; browser drops it, fails open
   ["position:absolute;left:-9999", false], // same, larger magnitude
@@ -148,6 +160,10 @@ const HIDDEN_STYLE_CASES = [
   ["overflow:hidden;max-height:0", true],
   ["overflow:visible;max-width:0", false],
   ["overflow:hidden;max-width:5px", false],
+  // near-zero (epsilon band), not exact 0 (bug: used parseFloat(value)===0)
+  ["overflow:hidden;height:0.0001px", true],
+  ["overflow:hidden;width:0.005em", true],
+  ["overflow:hidden;height:5px", false], // real height — visible
   // ── clip-path (fractional percentages) ──
   ["clip-path:inset(50%)", true],
   ["clip-path:inset(100%)", true],
@@ -180,6 +196,14 @@ const HIDDEN_STYLE_CASES = [
   ["transform:rotateX(90deg)", true],
   ["transform:rotateY(-90deg)", true],
   ["transform:rotateX(270deg)", true],
+  // ── rotate angle UNITS beyond deg + leading `+` (bug: hardcoded `deg`/`-?`) ──
+  ["transform:rotateX(0.25turn)", true], // 0.25turn === 90deg
+  ["transform:rotateY(100grad)", true], // 100grad === 90deg
+  ["transform:rotateX(1.5707963rad)", true], // ≈ π/2 rad === 90deg
+  ["transform:rotateY(+90deg)", true], // leading + sign
+  ["transform:rotateX(0.5turn)", false], // 180deg — in-plane, still visible
+  ["transform:rotateY(50grad)", false], // 45deg, projects area
+  ["transform:rotateX(90)", false], // unitless angle is invalid CSS — browser drops it, visible
   ["transform:translateX(-9999px)", true], // offscreen via transform (bug: position-only)
   ["transform:translatex(-100vw)", true], // a full viewport-width clears the screen
   ["transform:translate(0,-9999px)", true], // Y axis offscreen, X=0 (second arg was ignored)
@@ -211,6 +235,13 @@ const HIDDEN_STYLE_CASES = [
   ["color:rgb(255,255,255);background:white", true], // rgb vs named
   ["color:white;background-color:rgb(255, 255, 255)", true],
   ["color:#000;background:rgb(0,0,0)", true], // black on black
+  // ── non-primary named colors (bug: table had only white/black/red) ──
+  ["color:blue;background:blue", true], // any two identical resolvable names compare
+  ["color:teal;background-color:teal", true],
+  ["color:cyan;background:aqua", true], // cyan and aqua are the same #00ffff
+  ["color:rebeccapurple;background-color:rebeccapurple", true],
+  ["color:blue;background:white", false], // distinct named colors — visible text (precision)
+  ["color:navy;background:blue", false], // near but not equal — visible
   // CSS Color 4 notations canonicalize for the same-color compare.
   ["color:rgb(255 255 255);background:white", true], // space-separated rgb
   ["color:rgb(100% 100% 100%);background:#fff", true], // percentage channels
@@ -480,6 +511,22 @@ describe("unit: checkExfilUrl exact verdicts", () => {
     assert.equal(
       checkExfilUrl("  vbscript:Execute(x)"),
       "script-executing URI",
+    ));
+  // A browser strips tab/newline/CR from the URL before the scheme check, so a
+  // `java\tscript:` (or newline/CR-split) navigates as `javascript:`.
+  for (const [label, url] of [
+    ["tab", "java\tscript:alert(1)"],
+    ["newline", "java\nscript:alert(1)"],
+    ["CR", "java\rscript:alert(1)"],
+    ["vbscript newline", "vb\nscript:Execute(x)"],
+    ["mid-scheme tab", "javascri\tpt:alert(1)"],
+  ])
+    it(`flags a ${label}-split script URI (browser strips \\t\\n\\r first)`, () =>
+      assert.equal(checkExfilUrl(url), "script-executing URI"));
+  it("flags a tab-split active-content data: URI (whitespace-stripped scheme)", () =>
+    assert.equal(
+      checkExfilUrl("data:text/ht\tml,<b>x</b>"),
+      "active-content data: URI",
     ));
   it("flags a credential-shaped token value in a non-keyword param", () =>
     assert.equal(

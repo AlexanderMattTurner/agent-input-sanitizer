@@ -68,10 +68,21 @@ describe("fuzz: sanitizeText is crash-resistant and idempotent", () => {
     );
   });
 
-  it("is idempotent: a second pass over cleaned text changes nothing", async () => {
+  it("is idempotent AND actually strips a planted invisible/ANSI payload", async () => {
+    // Idempotence alone is vacuously true for a no-op sanitizer, so every case
+    // also plants a guaranteed-invisible payload (ZWSP + a red-SGR ANSI run)
+    // around the fuzzed body and asserts the FIRST pass removed it (modified,
+    // and neither byte survives) — the positive marker proving the strip path
+    // ran — before asserting the SECOND pass is a fixed point.
+    const ZWSP = cp(0x200b);
+    const payload = `${ZWSP}${ESC}[31m`;
     await fc.assert(
       fc.asyncProperty(adversarialInput, async (input) => {
-        const first = await sanitizeText(input);
+        const first = await sanitizeText(`${payload}${input}${payload}`);
+        assert.equal(first.modified, true);
+        assert.ok(!first.cleaned.includes(ZWSP));
+        assert.ok(!first.cleaned.includes(ESC));
+
         const second = await sanitizeText(first.cleaned);
         assert.equal(second.cleaned, first.cleaned);
         assert.equal(second.modified, false);
