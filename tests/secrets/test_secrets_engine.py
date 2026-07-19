@@ -665,7 +665,11 @@ def test_is_markdown_code_prose(label, value, expected):
         ("example prefix", "example-api-key", True),
         ("underscore separated", "your_api_key_here", True),
         ("space separated", "paste your token here", True),
-        ("diceware passphrase (real credential)", "correct-horse-battery-staple", False),
+        (
+            "diceware passphrase (real credential)",
+            "correct-horse-battery-staple",
+            False,
+        ),
         ("no metavariable token", "prod-service-worker-01", False),
         ("passphrase word here not a token", "here-horse-battery-staple", False),
         ("passphrase word enter not a token", "enter-horse-battery-staple", False),
