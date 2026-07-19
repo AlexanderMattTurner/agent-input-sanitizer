@@ -15,9 +15,12 @@ import { readFileSync } from "node:fs";
 
 import {
   extraCodepoints,
+  cfCodepoints,
+  charsetDoc,
   OUTPUT_PATH,
 } from "../scripts/gen-invisible-charset.mjs";
-import { VS, BLANK_NON_CF } from "../src/invisible.mjs";
+import { VS, BLANK_NON_CF, stripInvisible } from "../src/invisible.mjs";
+import { CF_CODEPOINTS } from "../src/cf-charset.mjs";
 import {
   parseStandardizedVariants,
   loadStandardizedVariantsUcd,
@@ -29,9 +32,18 @@ import {
 } from "../src/standardized-variants.mjs";
 
 describe("invisible-charset SSOT", () => {
-  it("committed JSON equals the freshly generated code points", () => {
-    const committed = JSON.parse(readFileSync(OUTPUT_PATH, "utf8"));
+  const committed = JSON.parse(readFileSync(OUTPUT_PATH, "utf8"));
+
+  it("committed JSON equals the freshly generated document (full round-trip)", () => {
+    assert.deepEqual(committed, charsetDoc());
+  });
+
+  it("committed JSON's extra code points equal the freshly generated ones", () => {
     assert.deepEqual(committed.extra_codepoints, extraCodepoints());
+  });
+
+  it("committed JSON's Cf code points equal Node's freshly enumerated \\p{Cf}", () => {
+    assert.deepEqual(committed.cf_codepoints, cfCodepoints());
   });
 
   it("covers every VS and BLANK_NON_CF code point (no member dropped)", () => {
@@ -47,6 +59,29 @@ describe("invisible-charset SSOT", () => {
     for (const s of [VS, BLANK_NON_CF])
       for (const ch of s) expected.add(ch.codePointAt(0));
     assert.equal(generated.size, expected.size);
+  });
+});
+
+// The cross-layer security invariant: the pinned Cf set the JS layer strips
+// (src/cf-charset.mjs) is IDENTICAL, member-for-member, to the set the Python
+// port reads from the committed JSON. If the two ever diverge, a key spliced with
+// a code point one side omits escapes that layer — the exact bug pinning fixes.
+describe("Cf charset is pinned identically for JS and Python", () => {
+  const committed = JSON.parse(readFileSync(OUTPUT_PATH, "utf8"));
+
+  it("the JS pinned Cf set equals the committed JSON's cf_codepoints", () => {
+    // Both artifacts are generated from the same source, so equality is exact
+    // (same order, no set-membership fudge) — a stronger contract than ⊆/⊇.
+    assert.deepEqual([...CF_CODEPOINTS], committed.cf_codepoints);
+  });
+
+  it("the JS layer actually strips a version-delta Cf char (U+13439)", () => {
+    // U+13439 (EGYPTIAN HIEROGLYPH beginning of horizontal joiner region) is Cf
+    // in Node's Unicode 17 but NOT Cf in the Unicode 14/15 CPython commonly
+    // ships. Before pinning, JS stripped it and the live-Cf Python port did not;
+    // now both strip it because both read the pinned set.
+    assert.ok(CF_CODEPOINTS.includes(0x13439));
+    assert.equal(stripInvisible("a\u{13439}b"), "ab");
   });
 });
 

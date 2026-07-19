@@ -194,6 +194,20 @@ describe("foldConfusables", () => {
     );
   });
 
+  it("throws when char is empty (would insert without consuming and then crash)", () => {
+    // An empty char makes startsWith("", i) vacuously true for any index, so the
+    // splice inserts latinEquivalent without consuming a glyph (silent
+    // insertion-corruption) and describeFolds later crashes on "".codePointAt(0).
+    // Must fail loud, matching the other finding-shape guards.
+    assert.throws(
+      () =>
+        foldConfusables(`/${CYR_A}b`, [
+          { index: 1, char: "", latinEquivalent: "a" },
+        ]),
+      /empty char/,
+    );
+  });
+
   it("allows a multi-character ASCII canon (e.g. a ligature fold)", () => {
     // Precision: a legitimate one-to-many ASCII fold (½ → 1/2, œ → oe) must NOT
     // be rejected by the ASCII guard — only non-ASCII replacements are refused.

@@ -40,11 +40,33 @@ def _extra() -> frozenset[int]:
 # ─── The charset is shared, not copied ───────────────────────────────────────
 
 
-def test_default_charset_is_live_cf_union_shared_extra():
-    """The redactor's charset is exactly every live Cf code point UNION the shared
-    non-Cf extras — no local list, so it cannot drift from the sanitizer."""
-    live_cf = {c for c in range(0x110000) if unicodedata.category(chr(c)) == "Cf"}
-    assert default_charset() == frozenset(live_cf) | _extra()
+def _pinned_cf() -> frozenset[int]:
+    from agent_input_sanitizer.invisible import cf_codepoints
+
+    return cf_codepoints()
+
+
+def test_default_charset_is_pinned_cf_union_shared_extra():
+    """The redactor's charset is exactly the PINNED Cf set UNION the shared non-Cf
+    extras — both read from the generated SSOT, so it cannot drift from the
+    sanitizer regardless of this interpreter's Unicode version."""
+    assert default_charset() == _pinned_cf() | _extra()
+
+
+def test_default_charset_does_not_depend_on_runtime_unicode_version():
+    """The Cf half is PINNED, not resolved from this interpreter's ``unicodedata``.
+    U+13439 is general-category Cf in the Unicode version Node pins from (17) but
+    NOT in the Unicode 14/15 CPython commonly ships, so a live-Cf resolution would
+    OMIT it here and the port would fail to strip a char the JS layer strips. The
+    pinned set must contain it regardless of what this interpreter thinks."""
+    assert 0x13439 in default_charset()
+    assert 0x13439 in _pinned_cf()
+    # Demonstrate the pin actually diverges from this interpreter's live Cf on at
+    # least this code point when the interpreter predates Unicode 17 (skip the
+    # assertion on a newer interpreter where they happen to agree).
+    runtime_major = int(unicodedata.unidata_version.split(".")[0])
+    if runtime_major < 17:
+        assert unicodedata.category(chr(0x13439)) != "Cf"
 
 
 @pytest.mark.drift_guard
