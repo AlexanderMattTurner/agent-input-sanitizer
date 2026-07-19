@@ -1308,6 +1308,22 @@ describe("rehydrate: Write cross-file and re-substitution safety", () => {
     assert.equal(out.updatedInput, undefined);
   });
 
+  it("P3: denies a Write carrying an UNCLOSED foreign hint (no trailing ']')", async () => {
+    // A valid same-file PH is substituted (so the foreign scan runs), but the
+    // content also pastes a hint-prefixed token with NO closing bracket. The
+    // token extends to end-of-string; absent from the file's own view, it is a
+    // foreign placeholder and must be denied (fail closed on the malformed run).
+    const src = `PASSWORD=${SECRET_A}\n`;
+    const vw = mkView(src, [{ value: SECRET_A, placeholder: PH }]);
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/f", content: `PASSWORD=${PH}\nnote ${DEFAULT_HINT}-oops\n` },
+      fakeIo(src, vw, reRedact),
+    );
+    assert.match(out.deny, /still carries a \[REDACTED…\] placeholder/);
+    assert.equal(out.updatedInput, undefined);
+  });
+
   it("R6: a Write substitutes in one pass, never re-touching an inserted secret's bytes", async () => {
     // SECRET_A's bytes literally contain PH_PEM's placeholder text. A chained
     // split(PH).join(secret) then split(PH_PEM).join(secretB) would clobber the
