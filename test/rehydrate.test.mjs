@@ -1317,7 +1317,10 @@ describe("rehydrate: Write cross-file and re-substitution safety", () => {
     const vw = mkView(src, [{ value: SECRET_A, placeholder: PH }]);
     const out = await rehydrateRedacted(
       "Write",
-      { file_path: "/f", content: `PASSWORD=${PH}\nnote ${DEFAULT_HINT}-oops\n` },
+      {
+        file_path: "/f",
+        content: `PASSWORD=${PH}\nnote ${DEFAULT_HINT}-oops\n`,
+      },
       fakeIo(src, vw, reRedact),
     );
     assert.match(out.deny, /still carries a \[REDACTED…\] placeholder/);
