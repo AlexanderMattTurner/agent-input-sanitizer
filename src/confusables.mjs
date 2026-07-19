@@ -112,6 +112,15 @@ export function foldConfusables(text, findings) {
       throw new Error(
         `Confusable finding has an out-of-range index ${finding.index}`,
       );
+    // An empty `char` makes startsWith("", i) vacuously true for ANY index, so
+    // the slice below inserts latinEquivalent without consuming a code point —
+    // silent insertion-corruption — and describeFolds then crashes on
+    // "".codePointAt(0). A finding must name a real matched glyph, so reject it
+    // loudly rather than let a buggy/adversarial scanner corrupt the input.
+    if (finding.char === "")
+      throw new Error(
+        `Confusable finding at index ${finding.index} has an empty char`,
+      );
     if (!folded.startsWith(finding.char, finding.index))
       throw new Error(
         `Confusable finding does not match input at index ${finding.index}: expected ${JSON.stringify(finding.char)}`,

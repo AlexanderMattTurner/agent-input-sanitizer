@@ -12,6 +12,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { sanitize, CATEGORY, CATEGORY_LABELS } from "../src/index.mjs";
+import {
+  stripInvisibleWithReport,
+  PRESERVE_HARD_CAP,
+  CONSECUTIVE_SELECTOR_CAP,
+} from "../src/invisible.mjs";
 import { cp } from "./test-helpers.mjs";
 import {
   spliceRanges,
@@ -336,5 +341,34 @@ describe("guard: srcset URL (first token, descriptor dropped) is scanned", () =>
     assert.equal(threats[0].target, "evil.example");
     assert.equal(threats[0].reason, "suspicious query parameter");
     assert.equal(threats[0].isImage, true);
+  });
+});
+
+// ─── invisible.mjs: carve-out preserve caps are the documented integers ───────
+// The Math.min(HARD_CAP, …) ceiling and the selector-run boundary comparison are
+// exact-integer contracts; an off-by-one or a dropped Math.min survives every
+// looser check, so pin the boundary behaviour to the named constant.
+
+describe("guard: carve-out preserve caps hold at the exact constant boundary", () => {
+  const countOf = (s, ch) => s.split(ch).length - 1;
+  const ZWNJ = cp(0x200c);
+
+  it("preserves EXACTLY PRESERVE_HARD_CAP joiners under unbounded cover text", () => {
+    // visibleLen ≈ 800 ⇒ ceil(visibleLen / 8) = 100; the Math.min ceiling clips
+    // that to PRESERVE_HARD_CAP. A mutant dropping the Math.min preserves 100,
+    // and an off-by-one shifts the count — both die on this exact-equality.
+    const unit = cp(0x645) + cp(0x6cc) + ZWNJ + cp(0x62e) + " ";
+    const { cleaned } = stripInvisibleWithReport(unit.repeat(200));
+    assert.equal(countOf(cleaned, ZWNJ), PRESERVE_HARD_CAP);
+  });
+
+  it("preserves EXACTLY CONSECUTIVE_SELECTOR_CAP selectors in an unbroken CJK run", () => {
+    // `<`ideograph`>`IVS repeated past the cap: the `selectorRun < CAP` boundary
+    // keeps exactly CONSECUTIVE_SELECTOR_CAP; a `<=` mutant keeps one more.
+    const input = (cp(0x845b) + cp(0xe0100)).repeat(
+      CONSECUTIVE_SELECTOR_CAP + 5,
+    );
+    const { cleaned } = stripInvisibleWithReport(input);
+    assert.equal(countOf(cleaned, cp(0xe0100)), CONSECUTIVE_SELECTOR_CAP);
   });
 });
