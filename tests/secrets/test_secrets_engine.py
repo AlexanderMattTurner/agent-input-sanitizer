@@ -519,6 +519,14 @@ def test_credential_token_still_redacted(label, text, expected):
         ("keyword noun token", "token", True),
         ("keyword noun apikey", "apikey", True),
         ("keyword noun prefix of longer word", "secretariat", False),
+        ("sentinel test", "test", True),
+        ("sentinel cased", "TEST", True),
+        ("sentinel sample", "sample", True),
+        ("sentinel todo", "TODO", True),
+        ("sentinel none", "none", True),
+        ("sentinel n/a", "N/A", True),
+        ("sentinel foo", "foo", True),
+        ("sentinel prefix of longer word", "testcredential9aB", False),
         ("high entropy mixed", "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e", False),
         ("caps with digits", "AKIAIOSFODNN7EXAMPLE", False),
         ("digit-bearing metavariable", "API_KEY_2_q9X2mN7pK4rT8wY1c", False),
@@ -547,6 +555,10 @@ def test_is_placeholder_value(label, value, expected):
         ("keyword noun cased", 'secret: "SECRET"'),
         ("password noun as value", 'password: "password"'),
         ("token noun as value", 'token: "token"'),
+        ("sentinel test value", 'secret: "test"'),
+        ("sentinel sample value", 'api_key: "sample"'),
+        ("sentinel todo value", 'token: "TODO"'),
+        ("sentinel none value", 'password: "none"'),
     ],
 )
 def test_placeholder_values_not_redacted(label, text):
@@ -639,6 +651,112 @@ def test_metadata_fields_not_redacted(label, text):
 )
 def test_is_markdown_code_prose(label, value, expected):
     assert E._is_markdown_code_prose(value) is expected, label
+
+
+# ─── Lowercase metavariables / timestamps / versions not redacted ────────────
+
+
+@pytest.mark.parametrize(
+    "label, value, expected",
+    [
+        ("your-...-here", "your-api-key-here", True),
+        ("paste imperative", "paste-your-token-here-now", True),
+        ("replace imperative", "replace-with-real-secret", True),
+        ("example prefix", "example-api-key", True),
+        ("underscore separated", "your_api_key_here", True),
+        ("space separated", "paste your token here", True),
+        (
+            "diceware passphrase (real credential)",
+            "correct-horse-battery-staple",
+            False,
+        ),
+        ("no metavariable token", "prod-service-worker-01", False),
+        ("passphrase word here not a token", "here-horse-battery-staple", False),
+        ("passphrase word enter not a token", "enter-horse-battery-staple", False),
+        ("single word", "your", False),
+        ("uppercase present", "Your-API-Key-Here", False),
+        ("smuggled opaque run", "your-key-here-deadbeef0123456789abcd", False),
+    ],
+)
+def test_is_lowercase_metavariable(label, value, expected):
+    assert E._is_lowercase_metavariable(value) is expected, label
+
+
+@pytest.mark.parametrize(
+    "label, value, expected",
+    [
+        ("date only", "2024-01-15", True),
+        ("datetime Z", "2024-01-15T10:30:00.000000Z", True),
+        ("datetime offset space", "2024-01-15 10:30:00+02:00", True),
+        ("datetime no seconds", "2024-01-15T10:30", True),
+        ("trailing tag not absorbed", "2024-01-15T10:30:00Z-batch01", False),
+        ("not a date", "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e", False),
+        ("partial date", "2024-01", False),
+    ],
+)
+def test_is_timestamp(label, value, expected):
+    assert E._is_timestamp(value) is expected, label
+
+
+@pytest.mark.parametrize(
+    "label, value, expected",
+    [
+        ("semver", "1.2.3", True),
+        ("v-prefixed", "v2.0.1", True),
+        ("prerelease build", "1.2.3-alpha.build.abcdef", True),
+        ("four segments", "1.2.3.4", True),
+        ("two segments only", "1.2", False),
+        ("smuggled secret in tail", "1.2.3-q9X2mN7pK4rT8wY1cV5bZ3", False),
+        ("not a version", "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e", False),
+    ],
+)
+def test_is_version(label, value, expected):
+    assert E._is_version(value) is expected, label
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("lowercase metavariable", 'api_key: "your-api-key-here"'),
+        ("paste metavariable", 'token: "paste-your-token-here-now"'),
+        ("iso timestamp keyword field", 'token_created: "2024-01-15T10:30:00.000000Z"'),
+        ("iso date field-value", "secret_updated: 2024-01-15"),
+        ("semver keyword field", 'secret_version: "1.2.3-alpha.build.abcdef"'),
+        ("version field-value", "token_api_version: v2.0.1"),
+    ],
+)
+def test_shape_skips_not_redacted(label, text):
+    redacted, found = redact(text)
+    assert redacted == text, label
+    assert found == [], label
+    # Value-shape skips are source-independent — they hold on web ingress too.
+    web, web_found = redact(text, cfg(web_ingress=True))
+    assert web == text and web_found == [], f"{label} (web)"
+
+
+@pytest.mark.parametrize(
+    "label, text, needle",
+    [
+        (
+            "diceware passphrase still redacts",
+            'password: "correct-horse-battery-staple"',
+            "correct-horse",
+        ),
+        (
+            "secret smuggled in version tail still redacts",
+            'secret: "1.2.3-q9X2mN7pK4rT8wY1cV5bZ3"',
+            "q9X2mN7pK4rT8wY1",
+        ),
+        (
+            "secret smuggled behind metavariable token still redacts",
+            'api_key: "your-key-here-deadbeef0123456789abcdef0123"',
+            "deadbeef0123456789",
+        ),
+    ],
+)
+def test_shape_skips_never_leak_real_secrets(label, text, needle):
+    redacted, _ = redact(text, cfg(web_ingress=True))
+    assert needle not in redacted, label
 
 
 def test_is_benign_keyword_match_none_secret_value():
