@@ -24,8 +24,10 @@ import {
   LONG_RUN_THRESHOLD,
   SCATTERED_THRESHOLD,
   CONSECUTIVE_JOINER_CAP,
+  CONSECUTIVE_SELECTOR_CAP,
   TOTAL_PRESERVED_JOINER_BUDGET,
   PRESERVED_JOINER_PER_VISIBLE,
+  PRESERVE_HARD_CAP,
   LINGUISTIC_SCRIPTS,
   describeStripped,
   payloadInvisibleView,
@@ -341,15 +343,24 @@ describe("stripInvisible: ZWNJ/ZWJ linguistic carve-out", () => {
     });
   }
 
-  it("preserves a keycap base + VS16 even with no trailing combining keycap (fail open on ambiguity)", () => {
-    // A keycap base followed by VS16 with nothing after it is not a complete
-    // keycap glyph, but per the fail-open doctrine we still do not strip the
-    // VS16 — an ambiguous case is better left as harmless "digit rendered
-    // with emoji presentation" than mangled.
+  it("strips a keycap base + VS16 with NO trailing combining keycap (fail closed)", () => {
+    // A keycap base + VS16 with nothing after it is NOT a complete keycap glyph;
+    // it is a bare presentation selector spliced after ordinary text — the top
+    // low-effort VS-smuggling shape. The carve-out fails CLOSED: preservation
+    // requires the mandatory U+20E3 keycap terminator, so this VS16 is stripped.
     const input = `1${cp(0xfe0f)}`;
     const { cleaned, found } = stripInvisibleWithReport(input);
-    assert.equal(cleaned, input);
-    assert.deepEqual(found, []);
+    assert.equal(cleaned, "1");
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
+  it("strips a VS15 after a lone digit with no keycap (fail closed)", () => {
+    // Same fail-closed rule for the text-presentation selector: `9` + VS15 with
+    // no U+20E3 is a hidden selector, not a glyph.
+    const input = `9${cp(0xfe0e)}`;
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, "9");
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
   });
 
   it("does not widen the ZWJ emoji-sequence carve-out to keycap bases", () => {
@@ -919,9 +930,52 @@ describe("stripInvisible: emoji tag sequences (subregional flags)", () => {
     assert.deepEqual(found, [CATEGORY.CF]);
   });
 
+  // A grammatically-valid tag run whose payload is NOT a registered subdivision
+  // is the ASCII-smuggling channel: tag chars decode to ASCII (cp − 0xE0000), so
+  // a well-formed 🏴 … CANCEL run can spell arbitrary text. Only a registered GB
+  // subdivision payload is preserved; every other run fails closed.
+  for (const [name, payload] of [
+    ["a short ASCII word", "hi"],
+    ["an injection phrase", "ignore"],
+    ["a US-state-shaped payload", "usca"],
+    ["a near-miss of a real subdivision", "gbxyz"],
+  ]) {
+    it(`strips a grammar-valid tag run with a non-subdivision payload (${name})`, () => {
+      const input = `a ${tagCode(payload)} b`;
+      const { cleaned, found } = stripInvisibleWithReport(input);
+      // Only the visible flag base survives; every tag char + CANCEL is stripped.
+      assert.equal(cleaned, `a ${cp(0x1f3f4)} b`);
+      assert.deepEqual(found, [CATEGORY.CF]);
+    });
+  }
+
+  it("strips a grammar-valid tag run that exceeds the tag-char cap", () => {
+    // Payload "gbengland" is a registered-prefix but 9 tag chars (> the ≤6 cap),
+    // so it fails closed even though it starts with a real subdivision code.
+    const input = tagCode("gbengland");
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, cp(0x1f3f4));
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("preserves a real England/Scotland/Wales flag next to a stripped fake flag (precision)", () => {
+    // The registered flag survives byte-for-byte; the adjacent fake-payload flag
+    // loses its tag run — precision counter-case to the strip assertions above.
+    const real = tagCode("gbeng");
+    const fake = tagCode("ignore");
+    const { cleaned, found } = stripInvisibleWithReport(`${real} ${fake}`);
+    assert.equal(cleaned, `${real} ${cp(0x1f3f4)}`);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
   it("is idempotent on a mixed valid/invalid tag document", () => {
     const input = `${tagCode("gbsct")} ${cp(0x1f3f4)}${cp(0xe0067)} tail`;
     const once = stripInvisible(input);
+    assert.equal(stripInvisible(once), once);
+  });
+
+  it("is idempotent on a non-subdivision fake-flag run", () => {
+    const once = stripInvisible(`x ${tagCode("ignorerules")} y`);
     assert.equal(stripInvisible(once), once);
   });
 
@@ -1028,6 +1082,113 @@ describe("stripInvisible: ideographic variation sequences", () => {
     const { cleaned, found } = stripInvisibleWithReport(input);
     assert.equal(cleaned, cp(0x1f3f3));
     assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+});
+
+// ─── Carve-out hardening: absolute preserve cap, selector run cap, virama base ─
+// Three tightenings that close covert channels the earlier carve-out left open:
+// an absolute ceiling on the preserve budget (so cover text can't scale it), a
+// consecutive-run cap on ideographic/standardized variation selectors (so a
+// per-character variation-selected CJK run can't smuggle bits), and a real
+// Brahmic-consonant requirement before a virama (so a bare halant + ZWJ is not
+// mistaken for a conjunct). Each strip assertion is paired with a preserve one.
+describe("stripInvisible: preserve budget has an absolute hard cap", () => {
+  const ZWNJ_CH = cp(0x200c);
+  const countOf = (s, ch) => s.split(ch).length - 1;
+
+  it(`never preserves more than PRESERVE_HARD_CAP joiners no matter how much cover text`, () => {
+    // 200 space-separated Persian ZWNJ words: each ZWNJ is meaningful (so none
+    // counts toward the scatter floor) and every gap resets the per-cluster cap,
+    // so ONLY the document-wide limit bounds the total. visibleLen ≈ 800 ⇒
+    // ceil(visibleLen / PER_VISIBLE) = 100, which WITHOUT the hard cap would
+    // preserve 100; the cap holds it to PRESERVE_HARD_CAP (64).
+    const unit = cp(0x645) + cp(0x6cc) + ZWNJ_CH + cp(0x62e) + " ";
+    const { cleaned, found } = stripInvisibleWithReport(unit.repeat(200));
+    assert.equal(countOf(cleaned, ZWNJ_CH), PRESERVE_HARD_CAP);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("preserves every joiner when the count sits under the hard cap (precision)", () => {
+    // 40 words ⇒ 40 ZWNJ, below PRESERVE_HARD_CAP (64) and below ceil(160/8)=20?
+    // visibleLen ≈ 160 ⇒ ceil/8 = 20, floored to TOTAL_PRESERVED_JOINER_BUDGET…
+    // 40 would still overrun that floor, so pad each gap to keep the allowance
+    // above 40: 20-space gaps ⇒ visibleLen ≈ 40*23 = 920 ⇒ allowance 64, so all
+    // 40 survive. Counter-case proving the cap only clips the SURPLUS.
+    const unit = cp(0x645) + cp(0x6cc) + ZWNJ_CH + cp(0x62e) + " ".repeat(20);
+    const { cleaned, found } = stripInvisibleWithReport(unit.repeat(40));
+    assert.equal(countOf(cleaned, ZWNJ_CH), 40);
+    assert.deepEqual(found, []);
+  });
+});
+
+describe("stripInvisible: consecutive variation-selector run cap", () => {
+  const IVS = cp(0xe0100);
+  const IDEO = cp(0x845b);
+  const countOf = (s, ch) => s.split(ch).length - 1;
+
+  it("caps a per-character variation-selected CJK run at CONSECUTIVE_SELECTOR_CAP", () => {
+    // `葛󠄀葛󠄀…` — every ideograph carries an IVS, an unbroken selector run with no
+    // gap. Each IVS is individually a valid ideographic variation sequence, so
+    // only the consecutive-run cap bounds the channel: past the cap the surplus
+    // selectors are stripped (the ideographs, being visible, all survive).
+    const runLen = CONSECUTIVE_SELECTOR_CAP + 6;
+    const { cleaned, found } = stripInvisibleWithReport(
+      (IDEO + IVS).repeat(runLen),
+    );
+    assert.equal(countOf(cleaned, IVS), CONSECUTIVE_SELECTOR_CAP);
+    assert.equal(countOf(cleaned, IDEO), runLen); // no ideograph is ever dropped
+    assert.deepEqual(found, [CATEGORY.VARIATION_SELECTORS]);
+  });
+
+  it("preserves a short variation-selected run under the cap (precision)", () => {
+    // Exactly CONSECUTIVE_SELECTOR_CAP selected ideographs: all survive verbatim.
+    const input = (IDEO + IVS).repeat(CONSECUTIVE_SELECTOR_CAP);
+    const { cleaned, found } = stripInvisibleWithReport(input);
+    assert.equal(cleaned, input);
+    assert.deepEqual(found, []);
+  });
+
+  it("resets the selector run at a genuine visible gap", () => {
+    // A space between two capped runs resets the counter, so each half preserves
+    // up to the cap independently — proof the reset (not just the cap) works.
+    const half = (IDEO + IVS).repeat(CONSECUTIVE_SELECTOR_CAP);
+    const { cleaned, found } = stripInvisibleWithReport(`${half}  ${half}`);
+    assert.equal(countOf(cleaned, IVS), CONSECUTIVE_SELECTOR_CAP * 2);
+    assert.deepEqual(found, []);
+  });
+});
+
+describe("stripInvisible: virama joiner requires a real consonant base", () => {
+  const VIRAMA = cp(0x94d); // Devanagari virama
+  const CONSONANT = cp(0x915); // Devanagari KA
+
+  it("strips a bare virama + ZWJ with no consonant base (fail closed)", () => {
+    // The virama itself (a combining mark) is not payload and remains; only the
+    // ZWJ, which does no conjunct work without a consonant, is stripped.
+    const { cleaned, found } = stripInvisibleWithReport(VIRAMA + ZWJ);
+    assert.equal(cleaned, VIRAMA);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("strips a virama + ZWJ whose base is a non-Brahmic (ASCII) letter", () => {
+    const { cleaned, found } = stripInvisibleWithReport(`a${VIRAMA}${ZWJ}b`);
+    assert.equal(cleaned, `a${VIRAMA}b`);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("strips a leading virama + ZWJ before a consonant (base is on the wrong side)", () => {
+    const { cleaned, found } = stripInvisibleWithReport(
+      VIRAMA + ZWJ + CONSONANT,
+    );
+    assert.equal(cleaned, VIRAMA + CONSONANT);
+    assert.deepEqual(found, [CATEGORY.CF]);
+  });
+
+  it("preserves a real consonant + virama + ZWJ + consonant conjunct (precision)", () => {
+    const conjunct = CONSONANT + VIRAMA + ZWJ + cp(0x937);
+    const { cleaned, found } = stripInvisibleWithReport(conjunct);
+    assert.equal(cleaned, conjunct);
+    assert.deepEqual(found, []);
   });
 });
 
@@ -1151,12 +1312,12 @@ describe("payloadInvisibleView + describeStripped: preserved runs don't alert", 
     assert.equal(view.includes(cp(0x200b)), true);
   });
 
-  it("no LONG RUN marker when a long invisible run is a preserved tag sequence", () => {
-    // A grammar-valid flag with 11 tag chars (> LONG_RUN_THRESHOLD) is preserved,
-    // so the injection marker must NOT fire even though a single ZWSP is stripped.
-    const bigFlag =
-      cp(0x1f3f4) + cp(0xe0041).repeat(LONG_RUN_THRESHOLD + 1) + CANCEL_TAG;
-    const deAnsi = bigFlag + cp(0x200b);
+  it("no LONG RUN marker when masking a preserved flag breaks an otherwise-long run", () => {
+    // A registered flag (6 preserved invisibles) immediately followed by 9 ZWSP
+    // payload: UNMASKED the 15 consecutive invisibles would trip LONG_RUN, but
+    // payloadInvisibleView masks the preserved flag chars to spaces, leaving only
+    // the 9 ZWSP (< LONG_RUN_THRESHOLD) — so the injection marker must NOT fire.
+    const deAnsi = tagCode("gbsct") + cp(0x200b).repeat(LONG_RUN_THRESHOLD - 1);
     const note = describeStripped([CATEGORY.CF], deAnsi);
     assert.doesNotMatch(note, /LONG RUN/);
   });

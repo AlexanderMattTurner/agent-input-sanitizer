@@ -74,6 +74,17 @@ const STRIP_TOKENS = [
   "Q" + ZWNJ + "K", // bare ZWNJ between plain ASCII
   "Q" + ZWSP + "K", // zero-width space, never preserved
   "Q" + cp(0xe0041) + cp(0xe0070) + "K", // Unicode tag characters (deniable ASCII channel)
+  // A GRAMMATICALLY-valid emoji tag sequence (🏴 + tag chars + CANCEL) whose
+  // decoded payload ("hi") is NOT a registered subdivision — the ASCII-smuggling
+  // shape. The visible flag base survives (so the full token string, which
+  // includes the stripped tag run + CANCEL, must NOT reappear); "Q…K" markers
+  // bracket it so the whole-token absence check is unambiguous.
+  "Q" +
+    cp(0x1f3f4) +
+    cp(0xe0000 + "h".charCodeAt(0)) +
+    cp(0xe0000 + "i".charCodeAt(0)) +
+    cp(0xe007f) +
+    "K",
 ];
 
 const pieceGen = fc.oneof(
