@@ -8,6 +8,31 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.46.0] - 2026-07-19
+
+### Changed
+
+- ci: run template sync daily instead of weekly (#152)
+- ci: notify on Sync from Template workflow failures (#151)
+- fix(ci): read the Claude key from GH_ACTION_ANTHROPIC_API_KEY (#150)
+- fix(ci): push release-docs + tag with the ruleset-bypass org token
+- style(secrets): ruff-format the metavariable parametrize table
+- fix(invisible): tighten the tag/joiner/selector carve-out against smuggled invisibles
+- style: apply prettier
+- test(rehydrate): cover the unclosed foreign-placeholder deny branch
+- fix(rehydrate): fail closed on preserved payloads, foreign placeholders, and unsorted pairs
+- fix(invisible): pin the Cf charset cross-language so JS and Python strip an identical set
+- fix(secrets): drop plaintext-value cache, propagate __exit__ errors, unblock daemon loop
+- refactor(secrets): drop passphrase-common metavariable tokens
+- fix(secrets): skip lowercase metavariables, timestamps, and versions
+- fix(secrets): treat documentation sentinel values as placeholders
+- fix(secrets): stop redacting bare credential-noun words as secret keywords
+- fix(ci): base the auto-publish bump on the highest live version, not the lagging latest tag
+- feat(output): surface Layer-2 reveal (pre-splice text) from sanitizeText and sanitizeValue
+- ci: notify via ntfy when a build or publish workflow fails (#138)
+- fix(ci): drop unworkable pnpm cache in setup-base-env (lockfile is gitignored)
+- ci: fix pnpm cache write, pin pre-commit via uv, drop for-loop word-split
+
 ## [1.6.4] - 2026-07-01
 
 ### Fixed
