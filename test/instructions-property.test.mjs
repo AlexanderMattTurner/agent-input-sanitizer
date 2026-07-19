@@ -54,7 +54,7 @@ describe("property: scanText invariants", () => {
         const findings = scanText(text);
         assert.ok(Array.isArray(findings));
         for (const f of findings) {
-          assert.equal(typeof f.line, "number");
+          assert.ok(f.line === null || typeof f.line === "number");
           assert.equal(typeof f.charCount, "number");
           assert.equal(typeof f.method, "string");
           assert.equal(typeof f.decoded, "string");

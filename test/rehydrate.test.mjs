@@ -1258,6 +1258,56 @@ describe("rehydrate: Write cross-file and re-substitution safety", () => {
     );
   });
 
+  it("P2: denies a foreign-placeholder Write onto a PRISTINE (secret-free) target", async () => {
+    // The target holds no secrets, so its view is byte-identical to disk
+    // (view.pairs empty, cleaned === content) and the early "view identical to
+    // disk" return would fire. A Write whose content carries a foreign
+    // [REDACTED…] placeholder must NOT sail through that fast path — it is
+    // denied exactly like a Write onto a secret-bearing or absent target,
+    // rather than persisting the placeholder verbatim over pristine bytes.
+    const src = "plain config, no secrets here\n";
+    const vw = mkView(src, []); // no pairs
+    const out = await rehydrateRedacted(
+      "Write",
+      { file_path: "/f", content: `KEY=${PH_PEM}\n` },
+      fakeIo(src, vw),
+    );
+    assert.match(out.deny, /does not match any secret/);
+    assert.match(
+      out.deny,
+      /cannot copy a placeholder from another file or context/,
+    );
+    assert.equal(out.updatedInput, undefined);
+  });
+
+  it("P3: denies a count-offsetting foreign-placeholder Write (drop one literal hint, add one foreign)", async () => {
+    // The file documents literal "[REDACTEDXYZ]" prose (one hint occurrence that
+    // is NOT a placeholder) and holds a real secret under PH. A Write that DROPS
+    // the prose and ADDS a foreign PH_PEM leaves the raw hint COUNT unchanged, so
+    // the old scalar `>` gate passed it — persisting the foreign placeholder.
+    // Comparing the actual placeholder STRINGS must still deny it.
+    const prose = "[REDACTEDXYZ]";
+    const src = `see ${prose} docs\nPW=${SECRET_A}\n`;
+    const vw = {
+      text: `see ${prose} docs\nPW=${PH}\n`,
+      pairs: [
+        {
+          placeholder: PH,
+          original: SECRET_A,
+          start: `see ${prose} docs\nPW=`.length,
+        },
+      ],
+    };
+    const out = await rehydrateRedacted(
+      "Write",
+      // prose dropped, foreign PH_PEM added, valid PH kept
+      { file_path: "/f", content: `PW=${PH}\nKEY=${PH_PEM}\n` },
+      fakeIo(src, vw, reRedact),
+    );
+    assert.match(out.deny, /still carries a \[REDACTED…\] placeholder/);
+    assert.equal(out.updatedInput, undefined);
+  });
+
   it("R6: a Write substitutes in one pass, never re-touching an inserted secret's bytes", async () => {
     // SECRET_A's bytes literally contain PH_PEM's placeholder text. A chained
     // split(PH).join(secret) then split(PH_PEM).join(secretB) would clobber the
