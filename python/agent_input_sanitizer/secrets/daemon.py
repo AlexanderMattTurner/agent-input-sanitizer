@@ -16,6 +16,7 @@ request (the socket may be shared across sessions, so the daemon must redact the
 REQUESTER's keys, not its own environment).
 """
 
+import concurrent.futures
 import contextlib
 import errno
 import fcntl
@@ -45,6 +46,15 @@ FRAME_CAP = 16 * 1024 * 1024
 # legitimate large request over a local socket, short enough to bound the DoS
 # window.
 CONN_TIMEOUT_SECONDS = 10.0
+
+# Accepted connections are handed to a fixed pool of worker threads rather than
+# served inline in the accept loop, so one slow/stalled local client can no longer
+# wedge every other client sharing the socket (a local DoS). The pool is BOUNDED:
+# at most this many requests run concurrently; further accepted connections queue
+# and are picked up as workers free. Each worker is itself time-bounded by
+# CONN_TIMEOUT_SECONDS, so the queue drains. Small — the daemon is a per-request
+# CPU-bound scan, not an I/O fan-out server; a handful of cores' worth is plenty.
+WORKER_POOL_SIZE = 8
 
 
 def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
@@ -237,6 +247,9 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
         if not bound:
             sock.close()
             return
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=WORKER_POOL_SIZE, thread_name_prefix="secret-redactor"
+        )
         try:
             os.chmod(socket_path, 0o600)  # defense-in-depth; harmless if redundant
             sock.listen(64)
@@ -247,11 +260,17 @@ def serve(socket_path: str, stop: threading.Event | None = None) -> None:
                 except TimeoutError:
                     continue
                 # Bound THIS connection's I/O; see CONN_TIMEOUT_SECONDS docstring.
-                # `_serve_one` is called inline (synchronously) below, so without
-                # this a stalled peer wedges the whole accept loop.
+                # The connection is handed to the worker pool (not served inline),
+                # so a stalled peer occupies only one worker instead of wedging the
+                # accept loop. `_serve_one` always closes its own conn.
                 conn.settimeout(CONN_TIMEOUT_SECONDS)
-                _serve_one(conn)
+                pool.submit(_serve_one, conn)
         finally:
+            # Stop accepting, then drain in-flight handlers so no connection is
+            # dropped mid-response. Each worker is bounded by CONN_TIMEOUT_SECONDS,
+            # so this wait terminates. Close the listen socket and unlink the path
+            # only after the pool has quiesced.
+            pool.shutdown(wait=True)
             sock.close()
             with contextlib.suppress(OSError):
                 os.unlink(socket_path)

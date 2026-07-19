@@ -147,9 +147,10 @@ def _resolve_marks(text: str, entries: list[tuple[str, str]]) -> tuple[str, list
     return "".join(out), pairs
 
 
-# re.compile self-caches identical patterns, so dropping this decorator is a
-# perf-only (correctness-equivalent) change the fast oracle cannot observe.
-@functools.cache
+# NOT memoized: `re.compile` self-caches identical patterns, so a decorator here
+# is redundant for perf — and an `lru_cache(maxsize=None)` keyed on `value` would
+# retain every requester's PLAINTEXT env-secret forever (unbounded growth plus
+# secret hoarding), since the daemon calls this per request with live secrets.
 def _env_value_re(value: str, charset: frozenset[int]) -> re.Pattern[str]:
     """Match ``value`` tolerating invisible chars (from ``charset``) spliced
     between its characters.
@@ -854,10 +855,18 @@ def configure_plugins(high_confidence: bool = False):
             return self
 
         def __exit__(self, *exc):
+            # A bare `return` inside `finally` swallows any exception propagating
+            # out of the `try` — here a `cache_clear()` fault — replacing it with
+            # the returned value. Clear the cache in the `try`; run the inner
+            # __exit__ (always, so the transient settings are released even if
+            # cache_clear raised) in the `finally`, capturing its verdict; and
+            # `return` that verdict AFTER the finally so a cache_clear exception
+            # propagates instead of being masked.
             try:
                 get_mapping_from_secret_type_to_class.cache_clear()
             finally:
-                return self._settings.__exit__(*exc)
+                settings_result = self._settings.__exit__(*exc)
+            return settings_result
 
     return _Ctx()
 

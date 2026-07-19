@@ -178,3 +178,29 @@ def test_daemon_survives_malformed_frame_then_serves(daemon):
     sock.close()
     resp = _client_request(daemon, {"text": "key: AKIAIOSFODNN7EXAMPLE", "map": False})
     assert "AWS Access Key" in resp["found"]
+
+
+def test_daemon_slow_client_does_not_block_a_second_client(daemon):
+    """A stalled client (partial frame, never completed) must not wedge the accept
+    loop: with the worker pool, a second concurrent client is served promptly
+    instead of waiting out the first client's CONN_TIMEOUT_SECONDS. Served inline,
+    the second request could not return until the stall timed out."""
+    slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    slow.connect(daemon)
+    try:
+        # 2 of the 4 header bytes, then silence: the handler blocks in
+        # `_recv_exact` until CONN_TIMEOUT_SECONDS (10s).
+        slow.sendall(b"\x00\x00")
+        start = time.time()
+        resp = _client_request(
+            daemon, {"text": "key: AKIAIOSFODNN7EXAMPLE", "map": False}
+        )
+        elapsed = time.time() - start
+        assert "AWS Access Key" in resp["found"]
+        # Comfortably under CONN_TIMEOUT_SECONDS: a blocked accept loop would make
+        # this second request wait ~10s behind the stalled first client.
+        assert elapsed < 5, f"second client waited {elapsed:.1f}s behind slow client"
+    finally:
+        # Close so the stalled worker's recv returns immediately and the pool can
+        # drain at daemon shutdown instead of waiting out the full timeout.
+        slow.close()
