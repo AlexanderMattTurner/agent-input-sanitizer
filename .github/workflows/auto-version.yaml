@@ -66,7 +66,7 @@ jobs:
       - name: Bump version and publish if commits warrant a release
         id: release
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.GH_ACTION_ANTHROPIC_API_KEY }}
         run: bash .github/scripts/version-bump.sh
 
       # Coupled PyPI release (PRIMARY path). When version-bump.sh actually
