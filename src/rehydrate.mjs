@@ -343,6 +343,42 @@ async function rehydrateEdit(
 }
 
 /**
+ * Foreign redaction placeholders surviving in post-substitution content `out`:
+ * hint-prefixed, placeholder-shaped tokens that are neither introduced by a
+ * substituted secret (they fall inside `secretSpans`) nor already present
+ * verbatim in the file's own sanitized `viewText` (a genuine same-file
+ * placeholder, or literal prose like `[REDACTEDXYZ]` that merely shares the hint
+ * prefix). A non-empty result means the Write pasted a `[REDACTED…]` placeholder
+ * from another file or context that would be persisted verbatim in place of a
+ * real secret. Comparing the actual token strings — not scalar hint counts —
+ * catches a count-offsetting edit (drop one literal hint, add one foreign
+ * placeholder) that a scalar `>` gate lets through.
+ * @param {string} out post-substitution content
+ * @param {string} hint placeholder prefix
+ * @param {string} viewText the file's own sanitized view
+ * @param {{start: number, end: number}[]} secretSpans byte ranges of substituted secrets in `out`
+ * @returns {string[]}
+ */
+function foreignPlaceholders(out, hint, viewText, secretSpans) {
+  const foreign = [];
+  for (const start of occurrences(out, hint)) {
+    if (secretSpans.some((span) => span.start <= start && start < span.end))
+      continue;
+    // Extend the token to the placeholder's closing "]"; a hint with no closing
+    // bracket is malformed, so treat the rest of the string as its text and let
+    // the same-view check below decide (an unclosed hint absent from the view
+    // is foreign, failing closed).
+    const close = out.indexOf("]", start + hint.length);
+    const token = close === -1 ? out.slice(start) : out.slice(start, close + 1);
+    // Genuine same-file text: the exact token already exists in the file's own
+    // sanitized view (an own placeholder, or hint-prefixed prose it documents).
+    if (viewText.includes(token)) continue;
+    foreign.push(token);
+  }
+  return foreign;
+}
+
+/**
  * @param {{file_path: string, content: string}} ti
  * @param {{text: string, pairs: {placeholder: string, original: string, start: number}[]}} view
  * @param {RehydrateIo} io
@@ -395,15 +431,18 @@ async function rehydrateWrite(ti, view, io, hint) {
   const matches = orderedMatches(ti.content, texts);
   let out = "";
   let last = 0;
-  // Hint occurrences introduced BY the substituted secrets (a pathological
-  // secret whose bytes contain the hint prefix), weighted by how many times each
-  // secret was inserted — so they are not later misread as foreign placeholders.
-  let secretHintCount = 0;
+  // Byte ranges in `out` occupied by the substituted secret values. A hint
+  // occurrence inside one of these is a pathological secret whose bytes contain
+  // the hint prefix, NOT a placeholder the model pasted — so it is excluded from
+  // the foreign-placeholder scan below.
+  const secretSpans = [];
   for (const match of matches) {
     const secret = valueByPh.get(match.text);
-    out += ti.content.slice(last, match.index) + secret;
+    out += ti.content.slice(last, match.index);
+    const secretStart = out.length;
+    out += secret;
+    secretSpans.push({ start: secretStart, end: out.length });
     last = match.index + match.text.length;
-    secretHintCount += occurrences(secret, hint).length;
   }
   out += ti.content.slice(last);
   const secrets = [...valueByPh.values()];
@@ -411,13 +450,12 @@ async function rehydrateWrite(ti, view, io, hint) {
   // R3: the new content may mix a valid same-file placeholder (substituted
   // above) with a FOREIGN one — a placeholder pasted from another file/context
   // that shares the hint prefix but is not one of this file's own. Those were
-  // left untouched and would be persisted verbatim over a real secret. After
-  // substitution, allow only the hint occurrences that genuinely exist as
-  // literal prose in the file's own view; any surplus is an unresolved foreign
-  // placeholder, so deny with the same cross-file guidance.
-  const literalHintCount =
-    occurrences(view.text, hint).length - view.pairs.length;
-  if (occurrences(out, hint).length - secretHintCount > literalHintCount)
+  // left untouched and would be persisted verbatim over a real secret. Compare
+  // the ACTUAL placeholder STRINGS, not scalar hint counts: a scalar comparison
+  // is defeated by an edit that drops one literal hint and adds one foreign
+  // placeholder (the counts net to zero), which would then persist the foreign
+  // placeholder. Deny when any genuinely-foreign placeholder survives.
+  if (foreignPlaceholders(out, hint, view.text, secretSpans).length > 0)
     return {
       deny:
         `the new content still carries a ${hint}…] placeholder that does not match any ` +
@@ -575,11 +613,22 @@ export async function rehydrateRedacted(
   // UTF-16. Normalize once here so an astral char before a placeholder can't
   // mis-anchor the edit (identical to a no-op for BMP-only files).
   view.pairs = pairsToUtf16(view.text, view.pairs);
-  // View identical to disk: any placeholders in the input are literal text.
-  // `cleaned === content` also rules out a lone-surrogate-only divergence
-  // (view.pairs/deletions alone would miss that, since the normalization is
-  // neither a redaction pair nor a Layer-1 deletion).
-  if (view.pairs.length === 0 && deletions.length === 0 && cleaned === content)
+  // View identical to disk: any placeholders in an Edit's old_string are
+  // literal text, so there is nothing to re-anchor. `cleaned === content` also
+  // rules out a lone-surrogate-only divergence (view.pairs/deletions alone
+  // would miss that, since the normalization is neither a redaction pair nor a
+  // Layer-1 deletion). A Write is the exception: its content still carries the
+  // hint prefix (isCandidate guaranteed it), and with no own placeholder to
+  // resolve that hint is a FOREIGN [REDACTED…] placeholder that would be
+  // persisted verbatim over pristine bytes. Fall through to rehydrateWrite so
+  // it denies with the cross-file guidance — the same verdict a Write onto a
+  // secret-bearing or absent target already gets.
+  if (
+    view.pairs.length === 0 &&
+    deletions.length === 0 &&
+    cleaned === content &&
+    !(tool === "Write" && toolInput.content.includes(hint))
+  )
     return null;
 
   return tool === "Edit"

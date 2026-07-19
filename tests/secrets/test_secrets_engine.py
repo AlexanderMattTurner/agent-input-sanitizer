@@ -1517,11 +1517,60 @@ def test_configure_plugins_then_redact_configured():
     assert found == ["AWS Access Key"]
 
 
-def test_env_value_re_is_cached():
+def test_env_value_re_not_memoized_so_no_plaintext_retention():
+    """`_env_value_re` must NOT be wrapped in functools.cache / lru_cache: such a
+    cache is keyed on the PLAINTEXT secret ``value`` and, being unbounded, would
+    retain every requester's secret forever (memory leak + secret hoarding). The
+    presence of ``cache_info``/``cache_clear`` is the tell-tale of that wrapper;
+    their ABSENCE proves distinct plaintext values are not retained across calls.
+    re.compile self-caches the compiled Pattern, so no function-level memo is
+    needed for perf and the pattern is still built correctly."""
     from agent_input_sanitizer.secrets.invisible import default_charset
 
+    assert not hasattr(E._env_value_re, "cache_info")
+    assert not hasattr(E._env_value_re, "cache_clear")
     charset = default_charset()
-    assert E._env_value_re("abcdef", charset) is E._env_value_re("abcdef", charset)
+    assert E._env_value_re("abcdef", charset).fullmatch("abcdef")
+
+
+def test_configure_plugins_exit_propagates_cache_clear_error(eng, monkeypatch):
+    """`configure_plugins().__exit__` must not swallow an exception raised in its
+    `try` body. A `return` inside the `finally` would mask a failing
+    ``cache_clear()``; the fixed version releases the transient settings in the
+    `finally` and lets the exception propagate."""
+    from agent_input_sanitizer.secrets import configure_plugins
+
+    class _Boom(Exception):
+        pass
+
+    ctx = configure_plugins()
+    ctx.__enter__()
+
+    class _RaisingMapping:
+        def cache_clear(self):
+            raise _Boom("cache_clear failed")
+
+    monkeypatch.setattr(eng, "get_mapping_from_secret_type_to_class", _RaisingMapping())
+    with pytest.raises(_Boom):
+        ctx.__exit__(None, None, None)
+
+
+def test_precision_legit_nonsecret_input_yields_zero_findings():
+    """Precision guard: ordinary prose and benign config-shaped lines must produce
+    NO findings — a false positive here mangles real content the model needed."""
+    benign = "\n".join(
+        [
+            "The quick brown fox jumps over the lazy dog.",
+            "user: alice",
+            "port: 8080",
+            "path: /usr/local/bin/agent-input-sanitizer",
+            "retries: 3",
+            "level: info",
+        ]
+    )
+    out, found = redact(benign)
+    assert found == []
+    assert out == benign
 
 
 def test_named_field_keeps_content_digest_value():

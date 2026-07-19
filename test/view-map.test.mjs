@@ -380,6 +380,42 @@ describe("pairsToUtf16", () => {
     );
   });
 
+  it("throws on out-of-order or overlapping pairs (mapViewOffset's else-break contract)", () => {
+    // mapViewOffset stops scanning at the first pair whose start is past the
+    // offset (`else break`), which is only sound if pairs are sorted and never
+    // overlap. Enforce that at ingestion — fail closed on a violation.
+    const text = `${PH} ${PH}`;
+    const s2 = text.indexOf(PH, 1);
+    // Out of order: the second pair's start precedes the first pair's.
+    assert.throws(
+      () =>
+        pairsToUtf16(text, [
+          { placeholder: PH, original: "a", start: s2 },
+          { placeholder: PH, original: "b", start: 0 },
+        ]),
+      /sorted and non-overlapping/,
+    );
+    // Overlapping: the first placeholder's span (start 0, len 10) still covers
+    // offset 1, where the second pair claims to start.
+    assert.throws(
+      () =>
+        pairsToUtf16(text, [
+          { placeholder: PH, original: "a", start: 0 },
+          { placeholder: PH, original: "b", start: 1 },
+        ]),
+      /sorted and non-overlapping/,
+    );
+    // Adjacent (previous end === next start) is the tight boundary and is valid.
+    const adj = `${PH}${PH}`;
+    assert.deepEqual(
+      pairsToUtf16(adj, [
+        { placeholder: PH, original: "a", start: 0 },
+        { placeholder: PH, original: "b", start: PH.length },
+      ]).map((pair) => pair.start),
+      [0, PH.length],
+    );
+  });
+
   it("normalizes several pairs, each by the astral count preceding it", () => {
     const text = `🔑 ${PH_KEY} 🔑 ${PH}`;
     const cp = Array.from(text);

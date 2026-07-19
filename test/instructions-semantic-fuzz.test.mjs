@@ -172,7 +172,7 @@ describe("semantic-correctness fuzz: scanText precision on mixed documents", () 
           planted >= SCATTERED_THRESHOLD
             ? [
                 {
-                  line: 0,
+                  line: null,
                   charCount: planted,
                   method:
                     "scattered invisible chars (possible threshold evasion)",

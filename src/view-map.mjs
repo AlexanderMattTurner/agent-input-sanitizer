@@ -127,6 +127,11 @@ export function pairsToUtf16(text, pairs) {
   prefix[0] = 0;
   for (let i = 0; i < codePoints.length; i++)
     prefix[i + 1] = prefix[i] + codePoints[i].length;
+  // Code-point end of the previous pair's placeholder span. mapViewOffset's
+  // `else break` (and pairDiskSpans) assume pairs are sorted by start and never
+  // overlap; an out-of-order or overlapping pair would make the scan stop early
+  // and mis-map an offset onto the wrong bytes. Enforce the contract here.
+  let prevEnd = 0;
   return pairs.map((pair) => {
     // A redactor offset outside [0, codePoints.length] indexes `prefix` out of
     // range and would silently yield `start: undefined`, which then poisons
@@ -141,6 +146,15 @@ export function pairsToUtf16(text, pairs) {
       throw new Error(
         `redaction pair start ${pair.start} is out of range [0, ${codePoints.length}]`,
       );
+    // Sorted + non-overlapping: `start` must be monotonically non-decreasing and
+    // each pair's placeholder span must end at or before the next pair's start.
+    // `prevEnd` already encodes the previous end, so `start < prevEnd` catches
+    // both an out-of-order start and an overlap in one comparison. Fail closed.
+    if (pair.start < prevEnd)
+      throw new Error(
+        `redaction pairs must be sorted and non-overlapping: pair start ${pair.start} precedes previous pair end ${prevEnd}`,
+      );
+    prevEnd = pair.start + Array.from(pair.placeholder).length;
     return { ...pair, start: prefix[pair.start] };
   });
 }

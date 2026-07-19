@@ -28,7 +28,11 @@ import {
   cleanFile,
   atomicReplaceFile,
 } from "../src/instructions.mjs";
-import { LONG_RUN_THRESHOLD, SCATTERED_THRESHOLD } from "../src/invisible.mjs";
+import {
+  LONG_RUN_THRESHOLD,
+  SCATTERED_THRESHOLD,
+  stripInvisible,
+} from "../src/invisible.mjs";
 import { cp } from "./test-helpers.mjs";
 
 // The caller's instruction-file globs (the package bakes in no convention).
@@ -99,12 +103,34 @@ describe("decodeRun", () => {
     assert.equal(result.decoded, `[90 zero-width chars: ${"0".repeat(80)}]`);
   });
 
-  it("decodes mixed/unknown invisibles as hex (case, padding, separator)", () => {
-    // U+00AD is neither tag nor a ZW-bit char, so the run lands in the mixed
-    // branch; pin uppercase, zero-pad-to-4, space-joined rendering.
-    const result = decodeRun(`${cp(0x00ad)}${cp(0x200b)}`);
+  it("decodes unknown invisibles (no recognized sub-encoding) as hex (case, padding, separator)", () => {
+    // Neither U+00AD (soft hyphen) nor U+2060 (word joiner) is a tag char or a
+    // ZW-bit char, so the run carries no recognized sub-encoding and lands in the
+    // unknown branch; pin uppercase, zero-pad-to-4, space-joined rendering.
+    const result = decodeRun(`${cp(0x00ad)}${cp(0x2060)}`);
     assert.match(result.method, /invisible Unicode/);
-    assert.equal(result.decoded, "U+00AD U+200B");
+    assert.equal(result.decoded, "U+00AD U+2060");
+  });
+
+  it("decodes BOTH sub-encodings for a 50/50 tag + zero-width run (no majority)", () => {
+    // A run split evenly between tag chars and zero-width bits gives neither
+    // class a strict majority, so both majority branches fall through. Raw-hex
+    // dumping would bury both payloads; instead each recognized sub-encoding is
+    // decoded and concatenated (P5).
+    const result = decodeRun(`${tagChars("AB")}${cp(0x200b)}${cp(0x200b)}`);
+    assert.equal(result.method, "mixed tag + zero-width encodings");
+    assert.equal(result.decoded, `${untrusted("AB")} [2 zero-width chars: 00]`);
+  });
+
+  it("notes an unrecognized remainder in the mixed-decode branch", () => {
+    // 2 tag + 1 ZW + 1 unrecognized (soft hyphen): no majority, so the mixed
+    // branch decodes tag + ZW and reports the leftover as `+ N other char(s)`.
+    const result = decodeRun(`${tagChars("Z")}${cp(0x200b)}${cp(0x00ad)}`);
+    assert.equal(result.method, "mixed tag + zero-width encodings");
+    assert.equal(
+      result.decoded,
+      `${untrusted("Z")} [1 zero-width chars: 0] + 1 other char(s)`,
+    );
   });
 
   it("reports the zero-width count for a run mixing tag-ASCII and ZW chars", () => {
@@ -202,7 +228,7 @@ describe("scanText", () => {
     assert.deepEqual(scanText("# Clean\n\nJust regular markdown.\n"), []);
   });
 
-  it("flags scattered chars at exactly the threshold (inclusive bound), line 0", () => {
+  it("flags scattered chars at exactly the threshold (inclusive bound), whole-file line null", () => {
     // No single run reaches LONG_RUN_THRESHOLD: interleave visible text.
     const chunks = Array.from({ length: SCATTERED_THRESHOLD }, () =>
       cp(0x200b),
@@ -212,7 +238,7 @@ describe("scanText", () => {
       .join("");
     const findings = scanText(content);
     assert.equal(findings.length, 1);
-    assert.equal(findings[0].line, 0);
+    assert.equal(findings[0].line, null);
     assert.match(findings[0].method, /scattered/);
     assert.equal(findings[0].charCount, SCATTERED_THRESHOLD);
     assert.equal(
@@ -707,6 +733,31 @@ describe("scan/clean contract", () => {
     assert.ok(scanText(original).length > 0, "precondition: scan flags it");
     assert.equal(cleanFile(file), true);
     assert.equal(readFileSync(file, "utf-8"), "xy\n");
+  });
+
+  it("clean returns null (NOT true) for a flagged-but-preserved emoji-tag run", () => {
+    // A well-formed but bogus subregional-flag sequence: WAVING BLACK FLAG base
+    // + >=LONG_RUN_THRESHOLD spec tag chars + CANCEL TAG. The consecutive Cf tag
+    // chars trip scanText's long-run detector, but the sequence is a VALID tag
+    // grammar so stripInvisible PRESERVES it verbatim. cleanFile must not rewrite
+    // identical bytes and claim `true` (payload removed); it fails closed with
+    // `null` meaning "flagged but not strippable", and the file is untouched.
+    const flag = `${cp(0x1f3f4)}${cp(0xe0041).repeat(LONG_RUN_THRESHOLD)}${cp(0xe007f)}`;
+    const original = `region: ${flag}\n`;
+    assert.ok(scanText(original).length > 0, "precondition: scan flags it");
+    assert.equal(
+      stripInvisible(original),
+      original,
+      "precondition: stripInvisible preserves the well-formed tag run",
+    );
+    const file = join(tmpDir, "CLAUDE.md");
+    writeFileSync(file, original);
+    assert.equal(cleanFile(file), null);
+    assert.equal(
+      readFileSync(file, "utf-8"),
+      original,
+      "bytes must be untouched when nothing was stripped",
+    );
   });
 });
 
