@@ -113,9 +113,7 @@ def test_live_cf_beyond_pinned_is_stripped(monkeypatch):
     to simulate a host interpreter AHEAD of the package's Unicode version — U+200B
     (``Cf`` on every build) must still be removed, so the port never under-strips
     when the host is newer than the package."""
-    monkeypatch.setattr(
-        "agent_input_sanitizer.textstrip.invisible_charset", frozenset
-    )
+    monkeypatch.setattr("agent_input_sanitizer.textstrip.invisible_charset", frozenset)
     assert strip_untrusted(f"a{chr(0x200B)}b") == "ab"
 
 
