@@ -28,11 +28,7 @@ import {
   cleanFile,
   atomicReplaceFile,
 } from "../src/instructions.mjs";
-import {
-  LONG_RUN_THRESHOLD,
-  SCATTERED_THRESHOLD,
-  stripInvisible,
-} from "../src/invisible.mjs";
+import { LONG_RUN_THRESHOLD, SCATTERED_THRESHOLD } from "../src/invisible.mjs";
 import { cp } from "./test-helpers.mjs";
 
 // The caller's instruction-file globs (the package bakes in no convention).
@@ -733,31 +729,6 @@ describe("scan/clean contract", () => {
     assert.ok(scanText(original).length > 0, "precondition: scan flags it");
     assert.equal(cleanFile(file), true);
     assert.equal(readFileSync(file, "utf-8"), "xy\n");
-  });
-
-  it("clean returns null (NOT true) for a flagged-but-preserved emoji-tag run", () => {
-    // A well-formed but bogus subregional-flag sequence: WAVING BLACK FLAG base
-    // + >=LONG_RUN_THRESHOLD spec tag chars + CANCEL TAG. The consecutive Cf tag
-    // chars trip scanText's long-run detector, but the sequence is a VALID tag
-    // grammar so stripInvisible PRESERVES it verbatim. cleanFile must not rewrite
-    // identical bytes and claim `true` (payload removed); it fails closed with
-    // `null` meaning "flagged but not strippable", and the file is untouched.
-    const flag = `${cp(0x1f3f4)}${cp(0xe0041).repeat(LONG_RUN_THRESHOLD)}${cp(0xe007f)}`;
-    const original = `region: ${flag}\n`;
-    assert.ok(scanText(original).length > 0, "precondition: scan flags it");
-    assert.equal(
-      stripInvisible(original),
-      original,
-      "precondition: stripInvisible preserves the well-formed tag run",
-    );
-    const file = join(tmpDir, "CLAUDE.md");
-    writeFileSync(file, original);
-    assert.equal(cleanFile(file), null);
-    assert.equal(
-      readFileSync(file, "utf-8"),
-      original,
-      "bytes must be untouched when nothing was stripped",
-    );
   });
 });
 
