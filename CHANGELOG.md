@@ -8,6 +8,17 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.3] - 2026-07-21
+
+### Changed
+
+- style: satisfy eslint/prettier on mutation-kill tests
+- test(rehydrate): kill surviving mutants in hidden-span and placeholder guards
+- test(output): kill surviving mutants in filter-enum and value-walk paths
+- test(instructions): kill surviving mutants in decode/scan/TOCTOU paths
+- test(invisible): kill surviving mutants in range/joiner boundary checks
+- test(gates): kill surviving mutants in secret/markdown gate regexes
+
 ## [1.47.2] - 2026-07-21
 
 ### Changed
