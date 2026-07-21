@@ -8,6 +8,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.2] - 2026-07-21
+
+### Changed
+
+- test(ci): match release-token guard to the org ruleset-bypass form
+- refactor(instructions): drop now-unused stripInvisible test import
+- refactor(instructions): drop dead cleanFile return-null branch
+
 ## [1.47.0] - 2026-07-21
 
 ### Changed
