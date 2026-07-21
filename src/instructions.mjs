@@ -421,10 +421,10 @@ export function atomicReplaceFile(
  * Strip payload-capable invisible characters from `absPath` in place. Returns
  * `true` when the file's bytes actually changed (a payload {@link scanText}
  * flags was removed), `false` when {@link scanText} reports nothing, and `null`
- * when scan flagged a payload but {@link stripInvisible} removes nothing — a
- * fail-closed signal that the flagged run was PRESERVED (e.g. a well-formed
- * emoji-tag sequence the stripper keeps), so the caller must not treat it as
- * cleaned. `true` means and only means "bytes changed".
+ * as a defensive fail-closed signal for the (currently unreachable) case where
+ * scan flagged a payload but {@link stripInvisible} removes nothing — see the
+ * shared-SSOT note at the guard below. `true` means and only means "bytes
+ * changed".
  *
  * Contract (scan/clean coherence): clean strips exactly what scan flags. A
  * write happens ONLY when `scanText` reports a finding, so the "scan, then
@@ -505,12 +505,16 @@ export function cleanFile(absPath, lstat = lstatSync) {
     if (scanText(original).length === 0) return false;
 
     const stripped = stripInvisible(original);
-    // scanText can flag a run that stripInvisible PRESERVES — a well-formed but
-    // bogus emoji-tag run (a base pictograph + tag chars + CANCEL) trips the
-    // scanner yet is kept intact by the stripper. Rewriting identical bytes and
-    // returning `true` would falsely report the payload removed. Fail closed:
-    // the bytes did not change, so signal "flagged but not strippable" (null),
-    // never "cleaned" (true).
+    // Defensive fail-closed: if the stripper leaves identical bytes for a run
+    // scanText flagged, signal "flagged but not strippable" (null) rather than
+    // rewrite nothing and falsely report the payload removed (true). scanText
+    // and stripInvisible now share one payload SSOT — both classify chars via
+    // invisible.mjs's carve-out (`analyzeCarve`), and every char scan counts as
+    // payload (`kind === null`) is stripped by carveStrip/bulkStrip — so a
+    // flagged run is always strippable and this branch is unreachable today.
+    // Kept (and c8-ignored, mirroring closingTagName) as defense-in-depth
+    // against a future divergence between the scanner and the stripper.
+    /* c8 ignore next */
     if (stripped === original) return null;
     // Re-verify the on-path file against the open-time snapshot before writing:
     // an inode/size/mtime change (or a swap to a symlink) means someone modified

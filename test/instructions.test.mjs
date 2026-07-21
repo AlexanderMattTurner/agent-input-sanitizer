@@ -735,29 +735,26 @@ describe("scan/clean contract", () => {
     assert.equal(readFileSync(file, "utf-8"), "xy\n");
   });
 
-  it("clean returns null (NOT true) for a flagged-but-preserved emoji-tag run", () => {
-    // A well-formed but bogus subregional-flag sequence: WAVING BLACK FLAG base
-    // + >=LONG_RUN_THRESHOLD spec tag chars + CANCEL TAG. The consecutive Cf tag
-    // chars trip scanText's long-run detector, but the sequence is a VALID tag
-    // grammar so stripInvisible PRESERVES it verbatim. cleanFile must not rewrite
-    // identical bytes and claim `true` (payload removed); it fails closed with
-    // `null` meaning "flagged but not strippable", and the file is untouched.
+  it("clean strips a bogus emoji-tag run down to its base pictograph", () => {
+    // A well-formed but UNREGISTERED subregional-flag sequence: WAVING BLACK FLAG
+    // base + spec tag chars + CANCEL TAG. Its tag grammar is valid, but it is not
+    // one of the registered GB subdivisions (gbeng/gbsct/gbwls), so the tightened
+    // carve-out fails it closed: scanText flags the tag-char run and stripInvisible
+    // removes it, leaving only the base pictograph. cleanFile therefore rewrites
+    // the file and reports `true` (bytes changed), NOT `null` — the tag payload is
+    // now strippable, so the flagged-but-preserved branch cannot be reached here.
     const flag = `${cp(0x1f3f4)}${cp(0xe0041).repeat(LONG_RUN_THRESHOLD)}${cp(0xe007f)}`;
     const original = `region: ${flag}\n`;
     assert.ok(scanText(original).length > 0, "precondition: scan flags it");
     assert.equal(
       stripInvisible(original),
-      original,
-      "precondition: stripInvisible preserves the well-formed tag run",
+      `region: ${cp(0x1f3f4)}\n`,
+      "precondition: stripInvisible removes the bogus tag run",
     );
     const file = join(tmpDir, "CLAUDE.md");
     writeFileSync(file, original);
-    assert.equal(cleanFile(file), null);
-    assert.equal(
-      readFileSync(file, "utf-8"),
-      original,
-      "bytes must be untouched when nothing was stripped",
-    );
+    assert.equal(cleanFile(file), true);
+    assert.equal(readFileSync(file, "utf-8"), `region: ${cp(0x1f3f4)}\n`);
   });
 });
 
