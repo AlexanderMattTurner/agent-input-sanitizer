@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.8] - 2026-07-21
+
+### Changed
+
+- ci: add TEMPLATE_SYNC_TOKEN_ORG as template-sync token fallback
+
 ## [1.47.7] - 2026-07-21
 
 ### Changed
