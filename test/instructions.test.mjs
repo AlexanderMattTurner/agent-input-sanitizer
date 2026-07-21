@@ -28,11 +28,7 @@ import {
   cleanFile,
   atomicReplaceFile,
 } from "../src/instructions.mjs";
-import {
-  LONG_RUN_THRESHOLD,
-  SCATTERED_THRESHOLD,
-  stripInvisible,
-} from "../src/invisible.mjs";
+import { LONG_RUN_THRESHOLD, SCATTERED_THRESHOLD } from "../src/invisible.mjs";
 import { cp } from "./test-helpers.mjs";
 
 // The caller's instruction-file globs (the package bakes in no convention).
