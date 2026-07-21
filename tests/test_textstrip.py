@@ -107,6 +107,18 @@ def test_pinned_cf_beats_interpreter_unicode_version() -> None:
     assert strip_untrusted(chr(0x13439)) == ""
 
 
+def test_live_cf_beyond_pinned_is_stripped(monkeypatch):
+    """Newer-host guarantee (the union's other half): a ``Cf`` char absent from the
+    pinned set is still stripped via the live category term. Empty the pinned set
+    to simulate a host interpreter AHEAD of the package's Unicode version — U+200B
+    (``Cf`` on every build) must still be removed, so the port never under-strips
+    when the host is newer than the package."""
+    monkeypatch.setattr(
+        "agent_input_sanitizer.textstrip.invisible_charset", frozenset
+    )
+    assert strip_untrusted(f"a{chr(0x200B)}b") == "ab"
+
+
 # ─── Deletion-only + idempotent + visible-text preservation ──────────────────
 
 try:

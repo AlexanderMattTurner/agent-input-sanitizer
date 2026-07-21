@@ -9,13 +9,16 @@ pip extras, and no ``detect-secrets``. The CLI-bridged entry points in
 module is the sanctioned exception for the no-Node context, exactly like
 :mod:`agent_input_sanitizer.invisible` (charset) and the ``secrets`` engine.
 
-The deletion set is the PINNED cross-language SSOT from :mod:`.invisible`
-(``invisible_charset`` = the pinned ``Cf`` set UNION the generated non-``Cf``
-extras), NOT the local interpreter's ``unicodedata`` ``Cf`` category. That
-distinction is load-bearing: CPython and Node ship different Unicode versions, so
-resolving ``Cf`` live under-strips every code point in the version delta (a key
-spliced with e.g. U+13439 escapes an older interpreter though the JS layer strips
-it). Reading the pinned set makes this port version-locked to the JS layer.
+A character is deleted if this interpreter classifies it as category ``Cf`` OR it
+is in the pinned cross-language set from :mod:`.invisible` (``invisible_charset``
+= the pinned ``Cf`` set UNION the generated non-``Cf`` extras). The UNION is
+load-bearing because CPython and Node ship different Unicode versions and this
+runs on an uncontrolled host interpreter: the pinned set covers a host OLDER than
+the package (a code point the package knows as ``Cf`` but this interpreter does
+not — e.g. U+13439), and the live ``Cf`` category covers a host NEWER than the
+package (a code point this interpreter knows as ``Cf`` but the pinned set does not
+yet list). Either term alone under-strips the opposite skew; the union never
+under-strips relative to the JS layer, whichever side is ahead.
 
 The two implementations (this and JS ``applyLayer1``) are kept in agreement by a
 behavioral equivalence test over a payload corpus, not by trusting the ports to
@@ -23,6 +26,7 @@ match by inspection.
 """
 
 import re
+import unicodedata
 
 from .invisible import invisible_charset
 
@@ -53,11 +57,14 @@ def strip_untrusted(text: str) -> str:
     """Return ``text`` with ANSI escapes and invisible/format Unicode removed.
 
     Deletion-only (the output is a subsequence of the input) and idempotent;
-    never raises on lone surrogates or astral input. The invisible deletion set
-    is the pinned cross-language SSOT, so this strips exactly what the JS layer's
-    ``applyLayer1`` strips regardless of this interpreter's Unicode version.
+    never raises on lone surrogates or astral input. A character is removed when
+    it is ``Cf`` in this interpreter or in the pinned cross-language set, so this
+    never under-strips relative to the JS layer whether the host Unicode version
+    is older or newer than the package's.
     """
     text = ANSI_RE.sub("", text)
     text = ESC_RE.sub("", text)
     invisible = invisible_charset()
-    return "".join(c for c in text if ord(c) not in invisible)
+    return "".join(
+        c for c in text if unicodedata.category(c) != "Cf" and ord(c) not in invisible
+    )
