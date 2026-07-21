@@ -575,11 +575,49 @@ function parseStyleSalvage(styleStr) {
         sawAny = true;
       }
     } catch {
-      // This one declaration is invalid; a browser drops only it and keeps
-      // the rest, so skip it rather than failing the whole style.
+      // This one declaration is a parse error even in isolation. Before
+      // dropping it (a browser drops only invalid declarations), try the raw
+      // first-colon fallback: `\64 isplay:none` is a parse error to
+      // style-to-object but a valid, applied `display:none` to a browser
+      // (escapes are legal in property-name idents), so dropping it here was
+      // a hidden-content bypass. The fallback accepts ONLY a declaration
+      // whose escape-decoded property name is a clean CSS ident; anything
+      // else stays dropped — failing open on styles a browser would reject
+      // (unterminated comments, `dis play`, brace junk) rather than
+      // manufacturing a false positive.
+      const raw = salvageDeclarationRaw(decl);
+      if (raw) {
+        salvaged[raw[0]] = raw[1];
+        sawAny = true;
+      }
     }
   }
   return sawAny ? salvaged : null;
+}
+
+// A CSS property-name ident AFTER escape decoding: up to two leading hyphens
+// (vendor prefix / custom property), then a letter or underscore, then
+// letters, digits, hyphens, or underscores. Deliberately strict — anything a
+// real browser's ident tokenizer would reject (spaces, `/*`, braces, quotes)
+// must fail this so the raw fallback cannot flag a declaration the browser
+// drops.
+const CSS_PROPERTY_IDENT_RE = /^-{0,2}[A-Za-z_][A-Za-z0-9_-]*$/;
+
+/**
+ * Raw fallback for a declaration `style-to-object` cannot parse: split at the
+ * first top-level colon and escape-decode the property name. Returns a
+ * `[property, value]` pair only when the decoded property is a clean CSS
+ * ident (see CSS_PROPERTY_IDENT_RE); the value is left raw — `isHiddenStyle`
+ * escape-decodes values itself before every keyword comparison.
+ * @param {string} decl
+ * @returns {[string, string] | null}
+ */
+function salvageDeclarationRaw(decl) {
+  const idx = decl.indexOf(":");
+  if (idx <= 0) return null;
+  const prop = decodeCssEscapes(decl.slice(0, idx)).trim().toLowerCase();
+  if (!CSS_PROPERTY_IDENT_RE.test(prop)) return null;
+  return [prop, decl.slice(idx + 1).trim()];
 }
 
 // CSS escape sequences (used in property VALUES, not just identifiers): a
