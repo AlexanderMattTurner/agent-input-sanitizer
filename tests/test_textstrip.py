@@ -39,7 +39,8 @@ _INVISIBLE = invisible_charset()
 _ANSI_CASES = [
     ("csi_sgr_color", "a\x1b[31mred\x1b[0mb", "aredb"),
     ("csi_cursor_move", "x\x1b[2Ky", "xy"),
-    ("csi_truncated_leaves_body", "a\x1b[1", "a1"),  # no final byte; ESC[ swept, digit left
+    # no final byte; ESC[ swept, digit left
+    ("csi_truncated_leaves_body", "a\x1b[1", "a1"),
     ("osc_title_bel", "a\x1b]0;title\x07b", "ab"),
     ("osc_title_st", "a\x1b]0;title\x1b\\b", "ab"),
     ("general_charset_select", "a\x1b(Bb", "ab"),
@@ -95,11 +96,7 @@ def test_pinned_cf_beats_interpreter_unicode_version() -> None:
     unstripped; reading the pinned set fixes it. U+13439 (EGYPTIAN HIEROGLYPH
     modifier, Unicode 15) is such a point on older CPython builds — the assertion
     holds whether or not this runner's Unicode is new enough to know it."""
-    drift = [
-        cp
-        for cp in cf_codepoints()
-        if unicodedata.category(chr(cp)) != "Cf"
-    ]
+    drift = [cp for cp in cf_codepoints() if unicodedata.category(chr(cp)) != "Cf"]
     # If this interpreter is behind Node's Unicode there IS a delta; each such
     # point must be stripped by the pinned-set membership test, never left to a
     # live ``unicodedata`` lookup that misses it.
