@@ -30,14 +30,18 @@ export const MD_LINK_HINT = /\]\(|!\[|^[ \t]*\[[^[\]\n]+\]:\s/m;
 
 // ─── Secret-shape pre-gate (Layer 3 URL-param reuse) ─────────────────────────
 // Cheap shape match that decides whether a URL parameter value carries a
-// credential (Layer 3). This is a deliberately BROADER, shorter-run superset of
-// the Python detect-secrets SSOT (python/.../secret-detectors.json): it adds
-// keyword and non-detector shapes (AWS `AKIA…`, JWT `eyJ…`, Slack `xox…`, …) and
-// trims each opaque run for ReDoS-safety, so it can't be a literal projection of
-// that JSON (which also isn't shipped in the npm `files`). The invariant that
-// every SSOT detector is still covered here is enforced by the contract test in
-// test/secret-detectors-portability.test.mjs — extend SECRET_HINT when adding a
-// detector there, or that test fails.
+// credential (Layer 3). This hand-duplicates credential-shape knowledge that
+// also lives in the Python detect-secrets detectors (python/.../secret-detectors.json)
+// — a deliberately BROADER, shorter-run superset that adds keyword and
+// non-detector shapes (AWS `AKIA…`, JWT `eyJ…`, Slack `xox…`, …) and trims each
+// opaque run for ReDoS-safety. It is NOT derivable from that JSON: inlining the
+// detector regexes would reintroduce the cross-arm polynomial backtracking the
+// two-alternation split below exists to prevent, so this is a distinct
+// representation for a distinct constraint, not a copy. That duplication can't
+// be collapsed to one source, so it is instead DRIFT-GUARDED: the test in
+// test/secret-detectors-portability.test.mjs drives from the JSON and fails the
+// moment a detector is added/changed without a matching arm here — extend
+// SECRET_HINT when that fires.
 // Split across TWO regexes, combined by matchesSecretHint:
 // one alternation of every arm makes a redos analyzer see cross-arm polynomial
 // backtracking (each arm is linear alone, but the union was a 3rd-degree

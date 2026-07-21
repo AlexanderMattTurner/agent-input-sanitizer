@@ -69,25 +69,29 @@ describe("secret-detectors.json patterns are JS-portable", () => {
 });
 
 /**
- * SSOT-coverage contract: the JS pre-gate `matchesSecretHint` (gates.mjs
- * `SECRET_HINT`/`SECRET_HINT_EXT`) MUST fire on every credential shape the
- * Python detect-secrets SSOT recognizes. `SECRET_HINT` cannot be *derived* from
- * the SSOT at this layer — the JSON is not shipped in the npm package (see
- * package.json `files`), `gates.mjs` is deliberately dependency-free and on the
- * lazy-load root path, and the pre-gate is intentionally a *broader, shorter-run
- * superset* (it also covers AWS `AKIA…`, JWT `eyJ…`, Slack `xox…`, Stripe
- * `sk_live_`, bare keywords, … that are not detectors here) whose run lengths
- * are trimmed for ReDoS-safety; a mechanical projection would either drop those
- * arms or risk widening a precision-critical path. So the two are pinned by this
- * contract instead: it enumerates the live SSOT and fails the moment a detector
- * is added/changed without a matching pre-gate arm, killing the silent-drift
- * hazard.
+ * DRIFT GUARD (not an SSOT — call it what it is). `SECRET_HINT` in gates.mjs
+ * hand-duplicates credential-shape knowledge that also lives in the Python
+ * detect-secrets detectors, and this block polices the two for agreement. The
+ * honest thing is to name that, not dress it up: a true single source is
+ * infeasible here for a CONCRETE reason — the JS pre-gate is a *different
+ * representation for a different constraint*, not a copy of the same regexes.
+ * detect-secrets' detector patterns cannot be inlined into `SECRET_HINT`: they
+ * would reintroduce the cross-arm polynomial backtracking the two-alternation
+ * split (see gates.mjs) exists to prevent, and the pre-gate is deliberately a
+ * *broader* superset (AWS `AKIA…`, JWT `eyJ…`, Slack `xox…`, Stripe `sk_live_`,
+ * bare keywords) with run lengths trimmed for ReDoS-safety. The weaker excuses
+ * (JSON not in npm `files`, `gates.mjs` dependency-free) are packaging choices;
+ * the ReDoS/representation boundary is the real one, and it is why the guard
+ * stays rather than the duplication dying.
  *
- * Each canonical example is asserted to (a) match its own detector pattern —
- * anchoring it to the SSOT so a tightened detector regex breaks the test rather
- * than passing vacuously — and (b) trip `matchesSecretHint`, proving pre-gate
- * coverage. The example map must cover EXACTLY the live detector set, so adding
- * a detector to the JSON without wiring the pre-gate fails CI here.
+ * Given the guard stays, it earns its keep: it drives from the ONE live source
+ * (the JSON) and fails the moment a detector is added/changed without a matching
+ * pre-gate arm — killing the silent-drift hazard the duplication creates. Each
+ * canonical example is asserted to (a) match its own detector pattern —
+ * anchoring it to the source so a tightened detector regex breaks the test
+ * rather than passing vacuously — and (b) trip `matchesSecretHint`, proving
+ * pre-gate coverage. `PATTERN_EXAMPLES` is itself a hand-maintained third copy;
+ * the `deepEqual` completeness check below is what keeps it honest.
  */
 const rep = (/** @type {number} */ n) => "A".repeat(n);
 const hex = (/** @type {number} */ n) =>
@@ -125,7 +129,7 @@ const PATTERN_CASES = detectors.flatMap((d) =>
   }),
 );
 
-describe("JS pre-gate covers every detect-secrets SSOT pattern", () => {
+describe("drift guard: JS pre-gate covers every detect-secrets detector pattern", () => {
   it("example map covers exactly the live pattern set (no missing/stale)", () => {
     const liveLabels = PATTERN_CASES.map(([label]) => label).sort();
     const mappedLabels = Object.keys(PATTERN_EXAMPLES).sort();
