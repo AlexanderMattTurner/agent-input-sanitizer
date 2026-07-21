@@ -146,6 +146,7 @@
     "SECURITY.md"
   ],
   "dependencies": {
+    "css-tree": "^3.2.1",
     "rehype-parse": "9.0.1",
     "remark-gfm": "4.0.1",
     "remark-parse": "11.0.0",

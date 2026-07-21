@@ -84,6 +84,14 @@ const HIDDEN_STYLE_CASES = [
   ["x;font-family:'a;b'", false], // single-quoted value: `;` inside is not a separator
   ["x;background:url(a;b)", false], // `;` inside url()/parens is not a separator
   ["x;background:url(a;display:none;b)", false], // display:none inside url() is NOT a real decl
+  // css-tree substrate: a comment between the colon and value is stripped, so a
+  // browser still applies the declaration (the hand-rolled parser choked on it).
+  ["display:/* c */none", true],
+  ["display:/* c */block", false], // same path, visible value stays visible
+  // css-tree substrate: robust function-arg + var() tokenization keeps these
+  // unresolvable values failing OPEN instead of being mis-read as offscreen/zero.
+  ["transform:scale(calc(0.0001))", false], // calc scale factor is unresolvable
+  ["position:absolute;left:var(--x)", false], // var() offset resolves via cascade
   ["x;a:b)c", false], // an unbalanced `)` at top level must not underflow the depth
   // ── zero / near-zero size (epsilon) ──
   // `height`/`width` alone (no `overflow:hidden`) are deliberately NOT
@@ -117,6 +125,7 @@ const HIDDEN_STYLE_CASES = [
   ["position:absolute;clip:rect(1,1,1,1)", true], // degenerate 0x0 window (the sr-only clip hack)
   ["position:absolute;clip:rect(10px,10px,20px,10px)", true], // right==left → zero width
   ["position:absolute;clip:rect(0px,50px,0px,0px)", true], // bottom==top → zero height
+  ["position:absolute;clip:rect(10%,20%,10%,20%)", true], // percentage edges: top==bottom → zero height (same as legacy string parser)
   ["position:absolute;clip:rect(auto,auto,auto,auto)", false], // auto edges unresolvable — fail open
   ["position:absolute;clip:rect(0px,5em,1em,0px)", false], // mismatched-unit pairs — fail open
   ["position:absolute;clip:rect(0,0,0)", false], // only 3 edges — malformed, fail open
@@ -136,6 +145,7 @@ const HIDDEN_STYLE_CASES = [
   ["position:absolute;left:auto", false], // non-length offset is not offscreen
   ["position:absolute;left:-1000", false], // unitless nonzero length is INVALID CSS; browser drops it, fails open
   ["position:absolute;left:-9999", false], // same, larger magnitude
+  ["position:absolute;left:-9999deg", false], // a non-length unit (deg) is invalid for an offset; browser drops it, fails open
   // ── text-indent offscreen ──
   ["text-indent:-9999px", true],
   ["text-indent:-100vw", true],
@@ -271,6 +281,7 @@ const HIDDEN_STYLE_CASES = [
   ["filter:opacity(0.005)", true], // sub-epsilon fraction
   ["filter:opacity(0.5%)", true], // 0.5% = 0.005 fraction, effectively invisible
   ["filter:blur(2px) opacity(0)", true], // opacity(0) anywhere in the list hides
+  ["filter:opacity()", false], // no amount — unresolvable, fail open
   ["filter:opacity(0.5)", false], // half-transparent stays readable
   ["filter:opacity(50%)", false], // 50% = 0.5 fraction, visible
   ["filter:opacity(1)", false],
