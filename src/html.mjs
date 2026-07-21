@@ -18,12 +18,14 @@
  * remark/rehype/unified graph costs ~200ms of module-load time, so the main
  * entry `await import()`s this module only when its cheap regex gates match.
  */
+// @ts-ignore -- css-tree ships no bundled types and @types/css-tree lags the 3.x
+// API (e.g. `ident.decode`); the value AST is walked with local `any` types.
+import * as csstree from "css-tree";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import rehypeParse from "rehype-parse";
 import { visit, SKIP, EXIT } from "unist-util-visit";
-import styleToObject from "style-to-object";
 import {
   HTML_TAG_PRESENT,
   MD_LINK_HINT,
@@ -44,18 +46,22 @@ export {
 };
 
 // ─── Layer 2: hidden-content detection ───────────────────────────────────────
+//
+// Values are tokenized by css-tree (its spec-compliant tokenizer/AST), not by
+// hand-rolled regexes: `parseDeclarations` splits declarations, decodes CSS
+// escapes, and strips `!important` through css-tree, and the structural
+// detectors below inspect the resulting typed value nodes (Number, Dimension,
+// Percentage, Function, …) directly. So an exponent (`scale(1e-3)`), an FF/CR
+// escape terminator, an escaped `!important`, or a `;` inside a quoted value is
+// read exactly as a browser reads it — the tokenizer-divergence bugs a
+// hand-rolled parser kept re-introducing simply cannot arise. Ambiguity still
+// fails OPEN (treated as visible): an unresolved unit, `calc()`, or `var()`
+// never counts as hidden.
 
 // A length/opacity/size is "near zero" when its magnitude is below this — a
 // browser renders 0.0001px text or 0.001 opacity as effectively invisible, so
 // requiring an exact 0 lets a trivially-perturbed value slip through.
 const NEAR_ZERO_EPSILON = 0.01;
-
-/** @param {string} value @returns {boolean} */
-function isNearZeroLength(value) {
-  if (!value) return false;
-  const number = parseFloat(value);
-  return Number.isFinite(number) && Math.abs(number) < NEAR_ZERO_EPSILON;
-}
 
 // A negative offset is "offscreen" only when it pushes the element ENTIRELY
 // past the viewport edge — the magnitude that takes depends on the unit. An
@@ -67,149 +73,245 @@ function isNearZeroLength(value) {
 // text, so this errs toward false-negative.
 const OFFSCREEN_ABSOLUTE_THRESHOLD = -900;
 const OFFSCREEN_VIEWPORT_THRESHOLD = -100;
-// The numeric arm accepts a sign and scientific notation (`-1e4px`) so a
-// browser-honored exponent form is read at its true magnitude, not truncated
-// at the `e` (which would make `translateX(-1e4px)` read as `-1px`, on-screen).
-// The unit is MANDATORY: per the CSS spec a nonzero unitless length is an
-// INVALID declaration and a browser drops it entirely (the element keeps its
-// normal on-screen position), so an optional unit here would read
-// `left:-1000` as offscreen and splice content a browser still renders. A
-// bare unitless `0` also fails this regex now, but that's inert — 0 never
-// clears the negative offscreen threshold below, so it was never flagged
-// either way.
-const ABSOLUTE_UNIT_RE =
-  /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:px|em|rem|ex|ch|pt|pc|in|cm|mm)$/;
-const VIEWPORT_UNIT_RE =
-  /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:vw|vh|vmin|vmax|%)$/;
-// Like VIEWPORT_UNIT_RE but WITHOUT `%`: inside a `translate()` a percentage is
-// resolved against the element's OWN size, not the viewport, so it can't be
-// judged offscreen without layout (see isOffscreenTranslate).
-const VIEWPORT_LENGTH_RE =
-  /^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*(?:vw|vh|vmin|vmax)$/;
 
-/** @param {string} value @returns {boolean} */
-function isOffscreenOffset(value) {
-  if (!value) return false;
-  if (ABSOLUTE_UNIT_RE.test(value))
-    return parseFloat(value) < OFFSCREEN_ABSOLUTE_THRESHOLD;
-  if (VIEWPORT_UNIT_RE.test(value))
-    return parseFloat(value) <= OFFSCREEN_VIEWPORT_THRESHOLD;
-  // `calc(...)` is deliberately NOT treated as offscreen. Resolving a calc
-  // needs the layout context (`calc(100% - 5px)` is an ordinary in-flow
-  // position), and a unit-blind "contains a negative number" guess flags those
-  // benign expressions — which would splice visible text. Ambiguity must fail
-  // OPEN (visible), so unresolved calc is left alone.
+// Absolute length units: a large negative magnitude is needed to clear the
+// viewport. True viewport units clear it at a full -100. A `%` offset is
+// viewport-relative for box offsets (left/top/…) but ELEMENT-relative inside a
+// translate(), so it is handled by the callers, not these sets.
+const ABSOLUTE_UNITS = new Set([
+  "px",
+  "em",
+  "rem",
+  "ex",
+  "ch",
+  "pt",
+  "pc",
+  "in",
+  "cm",
+  "mm",
+]);
+const VIEWPORT_UNITS = new Set(["vw", "vh", "vmin", "vmax"]);
+// Angle units for rotateX/rotateY, normalized to degrees by hueDegrees.
+const ANGLE_UNITS = new Set(["deg", "grad", "rad", "turn"]);
+
+/**
+ * The meaningful value tokens of a css-tree Value or Function node — its direct
+ * children minus the Operator/whitespace separators — in document order.
+ * @param {any} node
+ * @returns {any[]}
+ */
+function valueTokens(node) {
+  /** @type {any[]} */
+  const tokens = [];
+  if (!node || !node.children) return tokens;
+  node.children.forEach((/** @type {any} */ child) => {
+    if (child.type !== "Operator" && child.type !== "WhiteSpace")
+      tokens.push(child);
+  });
+  return tokens;
+}
+
+/**
+ * The single meaningful token of a value node, or null when the value is empty
+ * or carries more than one token (`left:auto` → the Identifier; `left:1px 2px`
+ * → null). A one-token requirement mirrors the old anchored `^…$` regexes.
+ * @param {any} node
+ * @returns {any | null}
+ */
+function soleToken(node) {
+  const tokens = valueTokens(node);
+  return tokens.length === 1 ? tokens[0] : null;
+}
+
+/**
+ * True when a value is a single length/number/percentage whose magnitude is
+ * (near) zero — `font-size:0`, `font-size:0.0001px`, `font-size:0%`. A keyword
+ * (`medium`), a multi-token value, or `calc()` fails open.
+ * @param {any} node
+ * @returns {boolean}
+ */
+function isNearZeroLength(node) {
+  const token = soleToken(node);
+  if (
+    !token ||
+    (token.type !== "Number" &&
+      token.type !== "Dimension" &&
+      token.type !== "Percentage")
+  )
+    return false;
+  return Math.abs(parseFloat(token.value)) < NEAR_ZERO_EPSILON;
+}
+
+/**
+ * Group a Function node's children into its comma-separated argument lists.
+ * `translate(0, -9999px)` → `[[Number 0], [Dimension -9999px]]`.
+ * @param {any} fn
+ * @returns {any[][]}
+ */
+function functionArgs(fn) {
+  /** @type {any[][]} */
+  const groups = [[]];
+  if (fn.children)
+    fn.children.forEach((/** @type {any} */ child) => {
+      if (child.type === "Operator" && child.value === ",") groups.push([]);
+      else if (child.type !== "WhiteSpace")
+        groups[groups.length - 1].push(child);
+    });
+  return groups;
+}
+
+/**
+ * True when a single length token is far enough offscreen to be fully clipped.
+ * `%` counts for box offsets (`allowPercent`, viewport-relative) but not inside
+ * a translate() (element-relative — unresolvable, fail open). A unitless Number
+ * (invalid CSS), an unknown unit, `calc()`, and `auto` all fail open.
+ * @param {any} token a css-tree value token
+ * @param {boolean} allowPercent
+ * @returns {boolean}
+ */
+function isOffscreenLength(token, allowPercent) {
+  if (token.type === "Dimension") {
+    const n = parseFloat(token.value);
+    if (ABSOLUTE_UNITS.has(token.unit)) return n < OFFSCREEN_ABSOLUTE_THRESHOLD;
+    if (VIEWPORT_UNITS.has(token.unit))
+      return n <= OFFSCREEN_VIEWPORT_THRESHOLD;
+    return false;
+  }
+  if (token.type === "Percentage" && allowPercent)
+    return parseFloat(token.value) <= OFFSCREEN_VIEWPORT_THRESHOLD;
   return false;
 }
 
 /**
- * Like isOffscreenOffset but for a `translate()` argument, where a percentage
- * resolves against the element's OWN size (not the viewport). A right-aligned
- * popover `left:100%; transform:translateX(-100%)` sits fully on screen, so a
- * `%` translate is unresolvable without layout and fails OPEN. Absolute units
- * (px/em/…) and true viewport units (vw/vh/…) ARE viewport-relative and keep
- * their offscreen thresholds.
- * @param {string} value
+ * Like isOffscreenLength but for a box offset (`left`/`top`/…/`text-indent`):
+ * the value must be a single token, and `%` is viewport-relative here so it
+ * counts.
+ * @param {any} node value node for the offset property
  * @returns {boolean}
  */
-function isOffscreenTranslate(value) {
-  if (!value) return false;
-  if (ABSOLUTE_UNIT_RE.test(value))
-    return parseFloat(value) < OFFSCREEN_ABSOLUTE_THRESHOLD;
-  if (VIEWPORT_LENGTH_RE.test(value))
-    return parseFloat(value) <= OFFSCREEN_VIEWPORT_THRESHOLD;
+function isOffscreenOffset(node) {
+  const token = soleToken(node);
+  return token ? isOffscreenLength(token, true) : false;
+}
+
+/**
+ * True when a `transform` renders text invisible: scaled to (near) nothing,
+ * rotated edge-on (an odd quarter-turn around X or Y projects to zero area), or
+ * translated far off any viewport. Walks the transform-function list so any
+ * hiding function anywhere in the list is caught.
+ * @param {any} node value node for `transform`
+ * @returns {boolean}
+ */
+function isHidingTransform(node) {
+  if (!node) return false;
+  for (const fn of valueTokens(node)) {
+    if (fn.type !== "Function") continue;
+    const name = fn.name.toLowerCase();
+    const args = valueTokens(fn);
+    if (/^(?:scale|scale3d|scalex|scaley|matrix|matrix3d)$/.test(name)) {
+      // scale/matrix collapse to nothing when their first numeric factor is
+      // (near-)zero; css-tree reads the exponent form (`1e-3`) at full value.
+      // scale()/matrix() factors are <number>s (never lengths).
+      const first = args.find((/** @type {any} */ a) => a.type === "Number");
+      if (first && Math.abs(parseFloat(first.value)) < NEAR_ZERO_EPSILON)
+        return true;
+    } else if (name === "rotatex" || name === "rotatey") {
+      // An axis rotation collapses the box to a line at an odd quarter-turn.
+      // Only the axis-specific rotations collapse; a plain rotate()/rotateZ()
+      // spins in-plane and stays visible. The angle needs an explicit unit (a
+      // unitless nonzero angle is invalid CSS a browser drops); hueDegrees
+      // normalizes deg/grad/rad/turn to [0,360), and a near-90/270 band absorbs
+      // the float drift of rad→deg.
+      const a = args[0];
+      if (
+        a &&
+        a.type === "Dimension" &&
+        ANGLE_UNITS.has(a.unit.toLowerCase())
+      ) {
+        const degrees = hueDegrees(`${a.value}${a.unit}`.toLowerCase());
+        if (
+          degrees !== null &&
+          (Math.abs(degrees - 90) < NEAR_ZERO_EPSILON ||
+            Math.abs(degrees - 270) < NEAR_ZERO_EPSILON)
+        )
+          return true;
+      }
+    } else if (
+      name === "translate" ||
+      name === "translatex" ||
+      name === "translatey"
+    ) {
+      // A two-axis translate hides when EITHER axis clears the viewport. A `%`
+      // translate is element-relative (unresolvable), so it fails open.
+      for (const group of functionArgs(fn))
+        if (group.length === 1 && isOffscreenLength(group[0], false))
+          return true;
+    }
+  }
   return false;
 }
 
 /**
- * A `transform` that renders text invisible: scaled to (near) nothing, rotated
- * edge-on (a quarter turn around X or Y leaves a zero-area projection), or
- * translated far off any viewport.
- * @param {string} transform
+ * True when a `filter` renders content invisible: an `opacity()` function drops
+ * the element to fully transparent. The amount is a <number-percentage>; a
+ * percentage is divided to a fraction before the near-zero test. Other filter
+ * functions keep content visible; an unresolvable amount fails OPEN.
+ * @param {any} node value node for `filter`
  * @returns {boolean}
  */
-function isHidingTransform(transform) {
-  if (!transform) return false;
-  // scale()/matrix() with a (near-)zero factor. The numeric capture accepts a
-  // leading sign and scientific notation (`1e-3`, `-1E-4`); without the
-  // exponent arm `scale(1e-3)` would capture only `1` and read as visible.
-  const scale = transform.match(
-    /\b(?:scale|scale3d|scalex|scaley|matrix|matrix3d)\(\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/,
-  );
-  if (scale && Math.abs(parseFloat(scale[1])) < NEAR_ZERO_EPSILON) return true;
-  // rotateX/rotateY by an odd multiple of 90deg turns the box edge-on (zero
-  // projected area). Only the axis-specific rotations collapse to a line; a
-  // plain rotate()/rotateZ() spins in-plane and stays visible.
-  // The angle carries a mandatory unit (deg/grad/rad/turn — a unitless nonzero
-  // angle is invalid CSS a browser drops, staying visible) and an optional
-  // sign; hueDegrees normalizes any of those units to `[0,360)` degrees. A
-  // near-90/270 band (not exact ==) absorbs the float drift of rad→deg.
-  const rotate = transform.match(
-    /\brotate[xy]\(\s*([+-]?\d*\.?\d+(?:deg|grad|rad|turn))/i,
-  );
-  if (rotate) {
-    const degrees = hueDegrees(rotate[1].toLowerCase());
+function isHidingFilter(node) {
+  if (!node) return false;
+  for (const fn of valueTokens(node)) {
+    if (fn.type !== "Function" || fn.name.toLowerCase() !== "opacity") continue;
+    const amount = valueTokens(fn)[0];
+    if (!amount) continue;
     if (
-      degrees !== null &&
-      (Math.abs(degrees - 90) < NEAR_ZERO_EPSILON ||
-        Math.abs(degrees - 270) < NEAR_ZERO_EPSILON)
+      amount.type === "Number" &&
+      parseFloat(amount.value) < NEAR_ZERO_EPSILON
+    )
+      return true;
+    if (
+      amount.type === "Percentage" &&
+      parseFloat(amount.value) / 100 < NEAR_ZERO_EPSILON
     )
       return true;
   }
-  // translateX/translateY/translate far off-screen. A two-axis `translate(x, y)`
-  // hides when EITHER axis clears the viewport, so split the argument list and
-  // test each — checking only the first arg missed a `translate(0, -9999px)`.
-  for (const match of transform.matchAll(/\btranslate(?:[xy])?\(\s*([^)]*)/gi))
-    for (const arg of match[1].split(","))
-      if (isOffscreenTranslate(arg.trim())) return true;
   return false;
 }
 
-/**
- * A `filter` that renders content invisible: an `opacity(0)` function drops the
- * element to fully transparent. The amount is a <number-percentage> (`0`..`1` or
- * `0%`..`100%`), so a percentage is divided to a fraction before the near-zero
- * test. Other filter functions (blur, brightness, drop-shadow) keep content
- * visible and are left alone; an unparseable amount fails OPEN (visible).
- * @param {string} filter
- * @returns {boolean}
- */
-function isHidingFilter(filter) {
-  if (!filter) return false;
-  const match = filter.match(
-    /\bopacity\(\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(%?)\s*\)/i,
-  );
-  if (!match) return false;
-  const value = parseFloat(match[1]);
-  const fraction = match[2] === "%" ? value / 100 : value;
-  return fraction < NEAR_ZERO_EPSILON;
+// One `clip: rect(...)` edge as a number and unit, or null for `auto`/any
+// non-length token (unresolvable → fail open). A bare Number carries unit "".
+/** @param {any} token @returns {{ num: number, unit: string } | null} */
+function clipEdge(token) {
+  if (token.type === "Dimension")
+    return { num: parseFloat(token.value), unit: token.unit };
+  if (token.type === "Number")
+    return { num: parseFloat(token.value), unit: "" };
+  if (token.type === "Percentage")
+    return { num: parseFloat(token.value), unit: "%" };
+  return null;
 }
 
-// A single `clip: rect(top, right, bottom, left)` edge, parsed to its number and
-// unit; `auto` and any non-length token yield null (unresolvable → fail open).
-const CLIP_EDGE_RE = /^([-+]?\d*\.?\d+)\s*([a-z%]*)$/;
-
 /**
- * True when a legacy `clip: rect(...)` clips the element to ~ZERO AREA — the
- * clipping window's width (`right - left`) or height (`bottom - top`) collapses
- * to near nothing. Checking only that the FIRST edge is `0` (the old
- * `rect(0…)`) spliced a VISIBLE `rect(0px,100px,100px,0px)` (a 100x100 window);
- * mirrors `isClipPathHidden`'s all-edges rule. Edges may be comma- OR
- * space-separated; an `auto`/unresolvable edge, or a pair in mismatched units,
- * fails OPEN (not proven collapsed).
- * @param {string} clip lowercased, trimmed
+ * True when a legacy `clip: rect(top, right, bottom, left)` clips the element to
+ * ~ZERO AREA — the window's width (`right - left`) or height (`bottom - top`)
+ * collapses to near nothing. Parses ALL FOUR edges (checking only the first
+ * spliced a visible `rect(0px,100px,100px,0px)`); an `auto`/unresolvable edge,
+ * a wrong edge count, or a pair in mismatched units fails OPEN.
+ * @param {any} node value node for `clip`
  * @returns {boolean}
  */
-function isClipRectHidden(clip) {
-  const rect = clip.match(/\brect\(([^)]*)\)/);
+function isClipRectHidden(node) {
+  if (!node) return false;
+  const rect = valueTokens(node).find(
+    (t) => t.type === "Function" && t.name.toLowerCase() === "rect",
+  );
   if (!rect) return false;
-  const parts = rect[1].split(/[\s,]+/).filter(Boolean);
-  if (parts.length !== 4) return false;
-  const edges = parts.map((part) => part.match(CLIP_EDGE_RE));
-  if (edges.some((edge) => edge === null)) return false;
-  const [top, right, bottom, left] = /** @type {RegExpMatchArray[]} */ (
+  const edges = valueTokens(rect).map(clipEdge);
+  if (edges.length !== 4 || edges.some((edge) => edge === null)) return false;
+  const [top, right, bottom, left] = /** @type {{num:number,unit:string}[]} */ (
     edges
-  ).map((edge) => ({ num: parseFloat(edge[1]), unit: edge[2] }));
+  );
   /**
    * @param {{ num: number, unit: string }} a
    * @param {{ num: number, unit: string }} b
@@ -219,22 +321,25 @@ function isClipRectHidden(clip) {
   return collapsed(left, right) || collapsed(top, bottom);
 }
 
-/** @param {(key: string) => string} val */
-function isPositionedOffscreen(val) {
-  const position = val("position");
+/**
+ * @param {(key: string) => any} nodeOf value node for a property, or null
+ * @param {(key: string) => string} textOf decoded/lowercased text for a property
+ * @returns {boolean}
+ */
+function isPositionedOffscreen(nodeOf, textOf) {
+  const position = textOf("position");
   // `relative`/`sticky` shift the rendered box off its normal spot just like
   // `absolute`/`fixed` do, so a `left:-9999px` on any of them pushes the text
   // off any viewport. `static` ignores offsets and is excluded.
   if (!/\babsolute\b|\bfixed\b|\brelative\b|\bsticky\b/.test(position))
     return false;
   for (const side of ["left", "top", "right", "bottom"])
-    if (isOffscreenOffset(val(side))) return true;
+    if (isOffscreenOffset(nodeOf(side))) return true;
   // The legacy `clip` property only clips ABSOLUTELY-positioned boxes
   // (absolute/fixed); a relative/sticky element ignores it, so reading its
   // rect() as a hide there would splice visible text (fail open).
   if (!/\babsolute\b|\bfixed\b/.test(position)) return false;
-  const clip = val("clip");
-  return Boolean(clip && isClipRectHidden(clip));
+  return isClipRectHidden(nodeOf("clip"));
 }
 
 // The full CSS named-color set canonicalized to `#rrggbb`, so any two identical
@@ -586,44 +691,68 @@ function backgroundColor(shorthand) {
 // at least 50%: opposing edges (top/bottom, left/right) then sum to >=100% and
 // leave zero area. A length (`inset(200px)`), `calc()`, or `0` cannot be proven
 // to collapse without the box size, so it fails open (not collapsing).
-/** @param {string} edge @returns {boolean} */
+/** @param {any} edge value token @returns {boolean} */
 function isCollapsingInsetEdge(edge) {
-  const pct = edge.match(/^\+?(\d*\.?\d+)%$/);
-  return (
-    Boolean(pct) && parseFloat(/** @type {RegExpMatchArray} */ (pct)[1]) >= 50
-  );
+  return edge.type === "Percentage" && parseFloat(edge.value) >= 50;
 }
 
-// Expand an `inset()`'s 1–4 edge values to `[top, right, bottom, left]` using
+// Expand an `inset()`'s 1–4 edge tokens to `[top, right, bottom, left]` using
 // the CSS margin-style shorthand rules.
-/** @param {string[]} parts @returns {string[]} */
+/** @param {any[]} parts @returns {any[]} */
 function expandInsetEdges(parts) {
   const [t, r = t, b = t, l = r] = parts;
   return [t, r, b, l];
 }
 
+// The edge tokens of an `inset()`, stopping at a `round <border-radius>` suffix.
+/** @param {any} fn `inset` Function node @returns {any[]} */
+function insetEdges(fn) {
+  /** @type {any[]} */
+  const edges = [];
+  for (const token of valueTokens(fn)) {
+    if (token.type === "Identifier" && token.name.toLowerCase() === "round")
+      break;
+    edges.push(token);
+  }
+  return edges;
+}
+
 /**
- * True when a `clip-path` clips the element to nothing: `circle(0)`, or an
- * `inset()` whose FOUR resolved edges ALL collapse (each a percentage >=50%).
- * A partial inset that leaves any edge open (`inset(50% 0 0 0)` — bottom half
- * visible) is NOT hidden: inspecting only the first value would over-splice it.
- * Decorative clips (`circle(50%)`, small insets, polygons) render content and
- * are left alone.
- * @param {string} clipPath  lowercased, trimmed
+ * True when a `clip-path` clips the element to nothing: `circle(0)` (zero
+ * radius, in any unit), or an `inset()` whose FOUR resolved edges ALL collapse
+ * (each a percentage >=50%). A partial inset that leaves any edge open
+ * (`inset(50% 0 0 0)` — bottom half visible) is NOT hidden: inspecting only the
+ * first value would over-splice it. Decorative clips (`circle(50%)`, small
+ * insets, polygons) render content and are left alone.
+ * @param {any} node value node for `clip-path`
  * @returns {boolean}
  */
-function isClipPathHidden(clipPath) {
-  if (/\bcircle\(\s{0,8}0(?![.\d])/.test(clipPath)) return true;
-  const inset = clipPath.match(/\binset\(([^)]*)\)/);
-  if (!inset) return false;
-  // Drop any `round <border-radius>` suffix, then read the edge list.
-  const parts = inset[1]
-    .split(/\bround\b/)[0]
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts.length === 0 || parts.length > 4) return false;
-  return expandInsetEdges(parts).every(isCollapsingInsetEdge);
+function isClipPathHidden(node) {
+  if (!node) return false;
+  for (const fn of valueTokens(node)) {
+    if (fn.type !== "Function") continue;
+    const name = fn.name.toLowerCase();
+    if (name === "circle") {
+      const radius = valueTokens(fn)[0];
+      if (
+        radius &&
+        (radius.type === "Number" ||
+          radius.type === "Dimension" ||
+          radius.type === "Percentage") &&
+        parseFloat(radius.value) === 0
+      )
+        return true;
+    } else if (name === "inset") {
+      const edges = insetEdges(fn);
+      if (
+        edges.length >= 1 &&
+        edges.length <= 4 &&
+        expandInsetEdges(edges).every(isCollapsingInsetEdge)
+      )
+        return true;
+    }
+  }
+  return false;
 }
 
 // The color painted by `-webkit-text-stroke` (the `<color>` token of the
@@ -663,192 +792,118 @@ function isTextPaintedVisible(val) {
   return isConcreteColor(stroke) && stroke !== "transparent";
 }
 
-/** @param {(key: string) => string} val */
-function isOverflowHidden(val) {
-  if (val("overflow") !== "hidden") return false;
+/**
+ * @param {(key: string) => any} nodeOf value node for a property, or null
+ * @param {(key: string) => string} textOf decoded/lowercased text for a property
+ * @returns {boolean}
+ */
+function isOverflowHidden(nodeOf, textOf) {
+  if (textOf("overflow") !== "hidden") return false;
   for (const dim of ["height", "width", "max-height", "max-width"])
     // Near-zero (epsilon band), not exact 0, so `height:0.0001px` still counts —
     // matching the standalone size checks a browser renders as invisible.
-    if (isNearZeroLength(val(dim))) return true;
+    if (isNearZeroLength(nodeOf(dim))) return true;
   return false;
 }
 
-// A length token in a `font` SHORTHAND whose font-size collapses the text. The
-// font-size sits just before the family, optionally as `font-size/line-height`;
-// only a length with an explicit font unit is a size (a bare number there is a
-// weight, a `%` a stretch), so those never misread as a zero size.
-const FONT_SHORTHAND_SIZE_RE =
-  /(?:^|\s)([+-]?\d*\.?\d+(?:px|em|rem|ex|ch|pt|pc|in|cm|mm|q))(?:\s*\/|\s|$)/i;
-
-/** @param {string} font lowercased, trimmed @returns {boolean} */
-function isFontShorthandHidden(font) {
-  const match = font.match(FONT_SHORTHAND_SIZE_RE);
-  return Boolean(match && isNearZeroLength(match[1]));
-}
+// The length units that denote a font-size in a `font` SHORTHAND. Only a length
+// with one of these units is a size (a bare number there is a weight, a `%` a
+// stretch), so those never misread as a zero size. `q` (quarter-mm) is a font
+// length unit too, though it never gates an offset above.
+const FONT_SIZE_UNITS = new Set([...ABSOLUTE_UNITS, "q"]);
 
 /**
- * Split a style string into declarations on top-level `;` only — a `;` inside a
- * string (`"…"`/`'…'`) or a function's parens (`url(…)`) is part of a value, not
- * a declaration separator, exactly as the CSS tokenizer treats it. A blind
- * `split(";")` would break `content:"a;display:none;b"` into a bare
- * `display:none` fragment and splice out VISIBLE content (a false positive).
- * @param {string} styleStr
- * @returns {string[]}
+ * True when a `font` SHORTHAND's font-size collapses the text to nothing. The
+ * font-size is the FIRST length token in the shorthand (it precedes an optional
+ * `/line-height` and the family); a near-zero one hides the text just like the
+ * `font-size` longhand.
+ * @param {any} node value node for `font`
+ * @returns {boolean}
  */
-function splitTopLevelDeclarations(styleStr) {
-  const decls = [];
-  let buf = "";
-  let depth = 0;
-  /** @type {string | null} */
-  let quote = null;
-  let escaped = false;
-  for (const ch of styleStr) {
-    if (quote) {
-      buf += ch;
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === quote) quote = null;
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
-      buf += ch;
-    } else if (ch === "(") {
-      depth += 1;
-      buf += ch;
-    } else if (ch === ")") {
-      if (depth > 0) depth -= 1;
-      buf += ch;
-    } else if (ch === ";" && depth === 0) {
-      decls.push(buf);
-      buf = "";
-    } else {
-      buf += ch;
-    }
-  }
-  decls.push(buf);
-  return decls;
-}
-
-/**
- * Parse a style string into a property map, salvaging what we can when the
- * whole string is syntactically invalid. `style-to-object` throws on the
- * FIRST bad declaration and abandons the rest of the string, but a browser
- * recovers per-declaration — it drops only the invalid one and keeps parsing
- * and applying the others. Gating detection on "the whole string parsed
- * cleanly" would let `x;display:none` hide content from a human (the browser
- * drops the bogus `x` and applies `display:none`) while going undetected
- * here — a splice bypass. So on a whole-string parse failure, this re-parses
- * each top-level declaration independently and keeps whichever ones parse; a
- * declaration that still fails on its own is dropped, matching the browser's
- * per-declaration recovery.
- * @param {string} styleStr
- * @returns {Record<string, unknown> | null}
- */
-function parseStyleSalvage(styleStr) {
-  try {
-    // @ts-ignore -- style-to-object default export not resolved under NodeNext
-    return styleToObject(styleStr);
-  } catch {
-    // Fall through to per-declaration salvage below.
-  }
-  /** @type {Record<string, unknown>} */
-  const salvaged = {};
-  let sawAny = false;
-  for (const decl of splitTopLevelDeclarations(styleStr)) {
-    if (!decl.trim()) continue;
-    try {
-      // @ts-ignore -- see above
-      const parsed = styleToObject(decl);
-      if (parsed) {
-        Object.assign(salvaged, parsed);
-        sawAny = true;
-      }
-    } catch {
-      // This one declaration is a parse error even in isolation. Before
-      // dropping it (a browser drops only invalid declarations), try the raw
-      // first-colon fallback: `\64 isplay:none` is a parse error to
-      // style-to-object but a valid, applied `display:none` to a browser
-      // (escapes are legal in property-name idents), so dropping it here was
-      // a hidden-content bypass. The fallback accepts ONLY a declaration
-      // whose escape-decoded property name is a clean CSS ident; anything
-      // else stays dropped — failing open on styles a browser would reject
-      // (unterminated comments, `dis play`, brace junk) rather than
-      // manufacturing a false positive.
-      const raw = salvageDeclarationRaw(decl);
-      if (raw) {
-        salvaged[raw[0]] = raw[1];
-        sawAny = true;
-      }
-    }
-  }
-  return sawAny ? salvaged : null;
+function isFontShorthandHidden(node) {
+  if (!node) return false;
+  for (const token of valueTokens(node))
+    if (token.type === "Dimension" && FONT_SIZE_UNITS.has(token.unit))
+      return Math.abs(parseFloat(token.value)) < NEAR_ZERO_EPSILON;
+  return false;
 }
 
 // A CSS property-name ident AFTER escape decoding: up to two leading hyphens
-// (vendor prefix / custom property), then a letter or underscore, then
-// letters, digits, hyphens, or underscores. Deliberately strict — anything a
-// real browser's ident tokenizer would reject (spaces, `/*`, braces, quotes)
-// must fail this so the raw fallback cannot flag a declaration the browser
-// drops.
+// (vendor prefix / custom property), then a letter or underscore, then letters,
+// digits, hyphens, or underscores. css-tree will accept an escaped ident as a
+// declaration property (e.g. `\3a` decoding to `:`); this gate rejects anything
+// a real browser's ident tokenizer would reject so a decoded non-ident property
+// never drives a hidden verdict.
 const CSS_PROPERTY_IDENT_RE = /^-{0,2}[A-Za-z_][A-Za-z0-9_-]*$/;
 
 /**
- * Raw fallback for a declaration `style-to-object` cannot parse: split at the
- * first top-level colon and escape-decode the property name. Returns a
- * `[property, value]` pair only when the decoded property is a clean CSS
- * ident (see CSS_PROPERTY_IDENT_RE); the value is left raw — `isHiddenStyle`
- * escape-decodes values itself before every keyword comparison.
- * @param {string} decl
- * @returns {[string, string] | null}
+ * Reconstruct a declaration's decoded value as a string for keyword/color
+ * comparisons. Identifier tokens are escape-decoded through css-tree's ident
+ * decoder (so `no\6e e`/`hi\64 den` read as `none`/`hidden`, with FF/CR/CRLF
+ * terminators and invalid codepoints handled per the CSS spec); every other
+ * token is re-serialized. A whole-value `Raw` (an unparsed value) is returned
+ * verbatim — it never matches a hiding keyword, so it fails open.
+ * @param {any} valueNode
+ * @returns {string}
  */
-function salvageDeclarationRaw(decl) {
-  const idx = decl.indexOf(":");
-  if (idx <= 0) return null;
-  const prop = decodeCssEscapes(decl.slice(0, idx)).trim().toLowerCase();
-  if (!CSS_PROPERTY_IDENT_RE.test(prop)) return null;
-  return [prop, decl.slice(idx + 1).trim()];
+function declText(valueNode) {
+  if (!valueNode) return "";
+  if (valueNode.type === "Raw") return valueNode.value;
+  /** @type {string[]} */
+  const parts = [];
+  if (valueNode.children)
+    valueNode.children.forEach((/** @type {any} */ child) =>
+      parts.push(
+        child.type === "Identifier"
+          ? csstree.ident.decode(child.name)
+          : csstree.generate(child),
+      ),
+    );
+  return parts.join(" ");
 }
 
-// CSS escape sequences (used in property VALUES, not just identifiers): a
-// backslash followed by 1-6 hex digits (with an optional single trailing
-// whitespace terminator that is consumed, not emitted) encodes a codepoint;
-// a backslash followed by any other character is that literal character. A
-// keyword can be spelled through this mechanism (`no\6e e` decodes to
-// `none`) and a real browser decodes it before matching the keyword, so
-// leaving it undecoded here is a detection bypass.
-const CSS_ESCAPE_RE = /\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)/g;
-
-// The trailing `!important` priority flag, stripped AFTER escape-decoding so an
-// escaped spelling (`none!\69mportant`) is caught. Bounded whitespace runs:
-// `\s*` on both sides of an unanchored match backtracks super-linearly
-// (redos/no-vulnerable); a CSS value never carries more than a couple of spaces
-// around `!important`.
-const IMPORTANT_FLAG_RE = /\s{0,8}!\s{0,8}important\s{0,8}$/i;
-
-/** @param {string} value @returns {string} */
-function decodeCssEscapes(value) {
-  // CSS input preprocessing (Syntax §3.3) normalizes CR, FF, and CRLF to LF
-  // BEFORE tokenizing, and one whitespace after a hex escape is consumed as its
-  // terminator. Do the same here first: otherwise an FF/CR/CRLF terminator — e.g.
-  // `display:\6e<FF>\6f<FF>\6e<FF>\65` — is left in place, so this decodes to
-  // "n\x0co\x0cn\x0ce" (!= "none") while a browser renders `none`, and the
-  // hidden-element splice is silently bypassed.
-  value = value.replace(/\r\n|[\r\f]/g, "\n");
-  return value.replace(CSS_ESCAPE_RE, (_match, hex, char) => {
-    if (!hex) return char;
-    const codepoint = parseInt(hex, 16);
-    // Per the CSS syntax spec, an escaped codepoint of zero, a surrogate
-    // half, or anything past the Unicode maximum is invalid and decodes to
-    // U+FFFD REPLACEMENT CHARACTER — not the raw codepoint, which would
-    // throw in `String.fromCodePoint` (e.g. `\ffffff` > 0x10FFFF) and break
-    // this module's never-throws contract.
-    if (
-      codepoint === 0 ||
-      (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
-      codepoint > 0x10ffff
-    )
-      return "\uFFFD";
-    return String.fromCodePoint(codepoint);
+/**
+ * Parse a style string into a map of decoded lowercase property name -> parsed
+ * value node, via css-tree's tolerant declaration-list parser. This replaces the
+ * hand-rolled declaration splitter, per-declaration salvage, escape decoder, and
+ * `!important` stripper in one pass: css-tree recovers per-declaration exactly
+ * as a browser does (a bogus declaration is dropped, the rest kept), keeps a `;`
+ * inside a string/`url()`/paren as part of the value, and exposes `!important`
+ * as `node.important` (so an escaped spelling `none!\69mportant` is stripped for
+ * free). Property names are escape-decoded and gated to real CSS idents;
+ * anything else is dropped (fail open). Later declarations win, per the cascade.
+ * @param {string} styleStr
+ * @returns {Map<string, any>}
+ */
+function parseDeclarations(styleStr) {
+  /** @type {Map<string, any>} */
+  const decls = new Map();
+  let ast;
+  try {
+    ast = csstree.parse(styleStr, {
+      context: "declarationList",
+      parseValue: true,
+      parseCustomProperty: false,
+      onParseError() {},
+    });
+    /* c8 ignore start -- the only reachable throw path is a non-string / deeply
+       pathological input (css-tree's onParseError recovers ordinary bad CSS);
+       this fail-open upholds the module's never-throws contract for those. */
+  } catch {
+    return decls;
+  }
+  /* c8 ignore stop */
+  csstree.walk(ast, {
+    visit: "Declaration",
+    enter(/** @type {any} */ node) {
+      // ident.decode is pure string iteration and cannot throw on a real ident
+      // token; property is escape-decoded then gated to a clean CSS ident.
+      const property = csstree.ident.decode(node.property).trim().toLowerCase();
+      if (!CSS_PROPERTY_IDENT_RE.test(property)) return;
+      decls.set(property, node.value);
+    },
   });
+  return decls;
 }
 
 /**
@@ -856,51 +911,36 @@ function decodeCssEscapes(value) {
  * @returns {boolean}
  */
 export function isHiddenStyle(styleStr) {
-  const rawProps = parseStyleSalvage(styleStr);
-  if (!rawProps) return false;
+  const decls = parseDeclarations(styleStr);
+  if (decls.size === 0) return false;
 
-  // CSS property names are case-insensitive; style-to-object preserves the raw
-  // value (including any `!important` and CSS escapes) verbatim.
-  /** @type {Record<string, string>} */
-  const props = {};
-  for (const [key, value] of Object.entries(rawProps))
-    props[key.toLowerCase()] = String(value);
-
-  // Values are CSS-escape-decoded BEFORE the `!important` flag is stripped and
-  // before every keyword/length comparison below: a browser decodes escapes
-  // first, so `none!\69mportant` renders `display:none !important` (hidden).
-  // Stripping `!important` off the RAW value missed the escaped spelling, so the
-  // value read as `none!important` (≠ `none`) and hidden content leaked. Decode,
-  // then strip the (now-literal) flag, then trim/lowercase for the compares.
   /** @param {string} key */
-  const val = (key) =>
-    decodeCssEscapes((props[key] || "").toString())
-      .replace(IMPORTANT_FLAG_RE, "")
-      .trim()
-      .toLowerCase();
+  const nodeOf = (key) => decls.get(key) ?? null;
+  // `!important` is already excluded by css-tree; escapes are decoded in
+  // declText. Trim/lowercase for the case-insensitive keyword compares.
+  /** @param {string} key */
+  const textOf = (key) => declText(decls.get(key)).trim().toLowerCase();
 
-  if (val("display") === "none") return true;
-  if (val("visibility") === "hidden" || val("visibility") === "collapse")
+  if (textOf("display") === "none") return true;
+  if (textOf("visibility") === "hidden" || textOf("visibility") === "collapse")
     return true;
   // `content-visibility:hidden` skips rendering the element's contents entirely
   // (not even laid out), so the text is invisible to a human but present in the
   // source. `auto`/`visible` keep it rendered and must not match.
-  if (val("content-visibility") === "hidden") return true;
+  if (textOf("content-visibility") === "hidden") return true;
 
   // CSS clamps opacity to [0,1], so any NEGATIVE value renders fully
-  // transparent — `< EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as hidden,
-  // where the old `Math.abs` mapped `-1` to `1` (visible) and let a
-  // negative-opacity hide slip through. `opacity` is a <number> or <percentage>;
-  // a value with any other unit (`0px`) is an INVALID declaration a browser
-  // ignores (element stays visible), so fail open on anything that isn't a bare
-  // number or percentage rather than `parseFloat`-ing the leading `0` out of it.
-  const opacity = val("opacity");
-  const opacityMatch = opacity.match(
-    /^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)(%?)$/,
-  );
-  if (opacityMatch) {
-    const n = parseFloat(opacityMatch[1]) / (opacityMatch[2] ? 100 : 1);
-    if (n < NEAR_ZERO_EPSILON) return true;
+  // transparent — `< EPSILON` (no `Math.abs`) treats `-1`/`-0.5` as hidden.
+  // `opacity` is a <number> or <percentage>; any other token (`0px`, a bare
+  // Dimension) is an INVALID declaration a browser ignores (element stays
+  // visible), so fail open on anything that isn't a single Number/Percentage.
+  const opacity = soleToken(nodeOf("opacity"));
+  if (opacity) {
+    let fraction = null;
+    if (opacity.type === "Number") fraction = parseFloat(opacity.value);
+    else if (opacity.type === "Percentage")
+      fraction = parseFloat(opacity.value) / 100;
+    if (fraction !== null && fraction < NEAR_ZERO_EPSILON) return true;
   }
 
   // `height`/`width` are deliberately NOT tested standalone here: with the
@@ -909,32 +949,31 @@ export function isHiddenStyle(styleStr) {
   // `isOverflowHidden` below already covers the case where a zero dimension
   // DOES hide content — gated on `overflow:hidden` also being present.
   // `font-size:0`, in contrast, reliably collapses text to nothing on its own.
-  if (isNearZeroLength(val("font-size"))) return true;
+  if (isNearZeroLength(nodeOf("font-size"))) return true;
   // The `font` shorthand also carries the font-size, so a `font:0px/1 serif`
   // collapses text just like the longhand — check its size token too.
-  if (isFontShorthandHidden(val("font"))) return true;
+  if (isFontShorthandHidden(nodeOf("font"))) return true;
 
-  if (isPositionedOffscreen(val)) return true;
+  if (isPositionedOffscreen(nodeOf, textOf)) return true;
 
-  if (isOffscreenOffset(val("text-indent"))) return true;
+  if (isOffscreenOffset(nodeOf("text-indent"))) return true;
 
   // Clipped to nothing: the modern equivalent of the legacy `clip: rect(0…)`.
-  const clipPath = val("clip-path");
-  if (clipPath && isClipPathHidden(clipPath)) return true;
-  if (isHidingTransform(val("transform"))) return true;
-  if (isHidingFilter(val("filter"))) return true;
+  if (isClipPathHidden(nodeOf("clip-path"))) return true;
+  if (isHidingTransform(nodeOf("transform"))) return true;
+  if (isHidingFilter(nodeOf("filter"))) return true;
 
   // Same-color text on its background (white-on-white) and fully transparent
   // text are invisible to a human but plain text to the model. Colors are
   // canonicalized so `white`/`#fff`/`rgb(255,255,255)` mixes still compare.
-  const color = canonicalizeColor(val("color"));
+  const color = canonicalizeColor(textOf("color"));
   // `color:transparent` alone hides text — UNLESS the glyphs are painted by a
   // background-clip:text gradient or a concrete -webkit-text-fill-color, the
   // standard gradient-heading recipe, in which case the text is visible.
-  if (color === "transparent" && !isTextPaintedVisible(val)) return true;
+  if (color === "transparent" && !isTextPaintedVisible(textOf)) return true;
   const background =
-    canonicalizeColor(val("background-color")) ||
-    backgroundColor(val("background"));
+    canonicalizeColor(textOf("background-color")) ||
+    backgroundColor(textOf("background"));
   // Only flag same-color when BOTH sides resolve to a concrete color (`#rrggbb`
   // or `transparent`). `var(--x)`, `inherit`, and `currentColor` canonicalize to
   // their raw token, so two identical unresolved tokens (e.g. the ubiquitous
@@ -943,7 +982,7 @@ export function isHiddenStyle(styleStr) {
   // and splice out visible text. Fail open on anything we can't resolve.
   if (color && color === background && isConcreteColor(color)) return true;
 
-  return isOverflowHidden(val);
+  return isOverflowHidden(nodeOf, textOf);
 }
 
 // Scripting / resource-loading tags whose PRESENCE is reported to the model
