@@ -121,6 +121,49 @@ def test_rejects_hook_with_syntax_error(tmp_path: Path, copy_script) -> None:
     assert "has a bash syntax error" in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(
+    "rel_path, content, expected_substring",
+    [
+        (
+            ".hooks/bad.mjs",
+            "const x = {;\n",
+            "has a JavaScript syntax error",
+        ),
+        (
+            ".hooks/bad.json",
+            '{"pairs": }\n',
+            "is not valid JSON",
+        ),
+    ],
+    ids=["mjs-syntax-error", "json-invalid"],
+)
+def test_rejects_non_bash_hook_files_with_errors(
+    tmp_path: Path, copy_script, rel_path: str, content: str, expected_substring: str
+) -> None:
+    """.mjs/.json hook helpers are checked with their own syntax tools, not bash -n
+    (which would reject even VALID files of those types)."""
+    write_settings(tmp_path, {"hooks": {}})
+    path = tmp_path / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    result = run_validator(tmp_path, copy_script)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert expected_substring in result.stdout + result.stderr
+
+
+def test_accepts_valid_mjs_and_json_hook_files(tmp_path: Path, copy_script) -> None:
+    """Valid .mjs/.json helpers in .hooks/ must pass — the old bash -n check
+    flagged them as bash syntax errors."""
+    write_settings(tmp_path, {"hooks": {}})
+    hooks_dir = tmp_path / ".hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    (hooks_dir / "helper.mjs").write_text('export const ok = { a: ["b"] };\n')
+    (hooks_dir / "data.json").write_text('{"pairs": {"a": ["b"]}}\n')
+    result = run_validator(tmp_path, copy_script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "All checks passed" in result.stdout + result.stderr
+
+
 def _pretooluse_settings(cmd: str) -> dict:
     return {
         "hooks": {

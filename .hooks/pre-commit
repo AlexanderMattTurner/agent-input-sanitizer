@@ -19,7 +19,34 @@ if [[ -d "$git_root/.venv/bin" ]]; then
 fi
 
 if [[ ! -f "$git_root/node_modules/.bin/lint-staged" ]]; then
+  # Fail open (a fresh clone must still be able to commit) but never silently:
+  # an unwarned skip here let unformatted/unchecked changes land more than once.
+  {
+    echo "=================================================================="
+    echo "pre-commit WARNING: lint-staged not installed — formatting/lint"
+    echo "checks and SSOT guard tests SKIPPED for this commit."
+    echo "Run 'pnpm install' to restore them."
+    echo "=================================================================="
+  } >&2
   exit 0
+fi
+
+# SSOT guard-test pairing: when a mapped SSOT source is staged, run its cheap
+# paired contract test(s) (map: .hooks/ssot-guard-pairs.json) so the data and
+# its guard can only change together — this repo has twice broken main by
+# editing a guarded source without its test. Skipped (with a warning, never
+# silently) when node or the pair map is unavailable — e.g. a sandboxed
+# environment or a downstream repo that hasn't adopted the map.
+if [[ -f "$git_root/.hooks/ssot-guard-pairs.json" ]]; then
+  if command -v node >/dev/null 2>&1; then
+    staged_files=()
+    while IFS= read -r line; do staged_files+=("$line"); done < <(git diff --cached --name-only --diff-filter=ACMRD)
+    if [[ "${#staged_files[@]}" -gt 0 ]]; then
+      node "$git_root/.hooks/run-ssot-guards.mjs" "${staged_files[@]}"
+    fi
+  else
+    echo "pre-commit WARNING: node not found — SSOT guard tests SKIPPED for this commit." >&2
+  fi
 fi
 
 if command -v pnpm >/dev/null 2>&1; then
