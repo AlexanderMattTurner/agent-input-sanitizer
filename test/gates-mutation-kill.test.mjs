@@ -74,7 +74,10 @@ describe("SECRET_HINT_EXT quantifier arms (removed {N} → exactly one char)", (
     // (?<![0-9])[0-9]{8,10}:[…]{35} → trailing {35} removed. Boundary via space.
     ["Telegram digits: + 1-char tail", " 12345678:x"],
     // (?<!…)[MNO][…]{23,25}\.[…]{6}\.[…]{27} → trailing {27} removed.
-    ["JWT M-head + 1-char final segment", "M" + "a".repeat(24) + "." + "b".repeat(6) + ".c"],
+    [
+      "JWT M-head + 1-char final segment",
+      "M" + "a".repeat(24) + "." + "b".repeat(6) + ".c",
+    ],
     // (?<![A-Za-z0-9])AP[0-9A-Fa-f][A-Za-z0-9]{8} → trailing {8} removed.
     ["Asana AP + hex + 1 char", " AP0a"],
     // (?<![A-Za-z0-9])AKC[A-Za-z0-9]{10} → trailing {10} removed.
@@ -93,7 +96,8 @@ describe("SECRET_HINT_EXT quantifier arms (removed {N} → exactly one char)", (
   // matches `M` while the mutant — needing a non-M/N/O head at that boundary —
   // cannot match anywhere. Original true, mutant false.
   it("shape-matches a JWT-style head starting with M", () => {
-    const jwt = "M" + "a".repeat(24) + "." + "b".repeat(6) + "." + "c".repeat(27);
+    const jwt =
+      "M" + "a".repeat(24) + "." + "b".repeat(6) + "." + "c".repeat(27);
     assert.equal(matchesSecretHint(jwt), true);
   });
 
@@ -101,7 +105,7 @@ describe("SECRET_HINT_EXT quantifier arms (removed {N} → exactly one char)", (
   // the original's optional quote eats the `"`, then `[\s:=>]+` eats `=`; the
   // mutant's `[^"']?` cannot consume the `"` (excluded) and then `[\s:=>]+`
   // faces `"` and fails. Original true, mutant false.
-  it("shape-matches a quoted key assignment key\"=<20 chars>", () => {
+  it('shape-matches a quoted key assignment key"=<20 chars>', () => {
     assert.equal(matchesSecretHint('key"=' + "a".repeat(20)), true);
   });
 });

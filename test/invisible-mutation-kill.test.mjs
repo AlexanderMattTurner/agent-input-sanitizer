@@ -13,7 +13,6 @@ import {
   stripInvisible,
   stripInvisibleWithReport,
   payloadInvisibleView,
-  CATEGORY,
 } from "../src/invisible.mjs";
 import { cp } from "./test-helpers.mjs";
 

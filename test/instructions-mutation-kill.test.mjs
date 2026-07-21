@@ -166,10 +166,7 @@ describe("cleanFile mutation kills", () => {
     writeFileSync(target, `# t\n${tagChars("payload here")}\n`);
     const link = join(tmpDir, "CLAUDE.md");
     symlinkSync(target, link, "file");
-    assert.throws(
-      () => cleanFile(link),
-      /refusing to clean through a symlink/,
-    );
+    assert.throws(() => cleanFile(link), /refusing to clean through a symlink/);
   });
 
   it("refuses a directory with the non-regular-file message", () => {
@@ -179,10 +176,7 @@ describe("cleanFile mutation kills", () => {
     // through to a raw EISDIR read error or throw an empty message.
     const dir = join(tmpDir, "CLAUDE.md");
     mkdirSync(dir);
-    assert.throws(
-      () => cleanFile(dir),
-      /refusing to clean a non-regular file/,
-    );
+    assert.throws(() => cleanFile(dir), /refusing to clean a non-regular file/);
   });
 
   it("cleans a contaminated regular file and returns true", () => {
@@ -198,7 +192,7 @@ describe("cleanFile mutation kills", () => {
   // ── TOCTOU guard: isolate each disjunct so a mutant dropping/regrouping it
   //    stops throwing. The injected lstat differs from the open-time fstat in
   //    exactly ONE field; the file is never modified, so all other fields match.
-  const withGuard = (name, override, targetLine) =>
+  const withGuard = (name, override) =>
     it(`throws when only ${name} changed between read and write`, () => {
       // kills ConditionalExpression src/instructions.mjs:${targetLine} and the
       // LogicalOperator regroupings on src/instructions.mjs:513 that drop this
