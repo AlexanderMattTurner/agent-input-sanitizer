@@ -342,3 +342,55 @@ def test_fails_loudly_without_github_output(workdir: Path) -> None:
     )
     assert result.returncode != 0
     assert "GITHUB_OUTPUT" in result.stderr
+
+def test_survives_self_overwrite_with_longer_file(workdir: Path) -> None:
+    """The script lives under a synced path, so a sync overwrites its own file
+    mid-run. When the replacement is LONGER than the running file, a bash that
+    keeps reading the on-disk script resumes at a stale byte offset and dies
+    with "unexpected EOF". The script must re-exec from an immutable copy so
+    self-overwrite (even with a longer, deliberately broken tail) is harmless.
+
+    Runs the CHILD's own committed copy (relative path, exactly like CI), not
+    the repo SCRIPT, because only overwriting the file bash is executing
+    triggers the bug. Removing the re-exec guard flips this test red.
+    """
+    child = workdir / "child"
+    template = workdir / "template"
+    script_rel = ".github/scripts/template-sync.sh"
+    script_bytes = SCRIPT.read_text()
+
+    # Base == the current script; child adopts it verbatim (Case 5 later).
+    write(template / script_rel, script_bytes)
+    prev_sha = commit_all(template)
+    write(child / script_rel, script_bytes)
+    (child / ".template-version").write_text(prev_sha)
+    commit_all(child)
+
+    # Template advances to an identical prefix + a longer, broken tail. Because
+    # the prefix is byte-identical, an unguarded bash resuming past `main "$@"`
+    # lands exactly on the broken tail and crashes.
+    broken_tail = '\n# padding past original EOF\necho "unterminated quote\n'
+    write(template / script_rel, script_bytes + broken_tail)
+    commit_all(template)
+
+    template_copy = child / "_template"
+    subprocess.run(["cp", "-a", str(template), str(template_copy)], check=True)
+    output_file = child.parent / "github_output_selfoverwrite.txt"
+    output_file.write_text("")
+    work = child.parent / "work_selfoverwrite"
+    work.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        **GIT_IDENTITY_ENV,
+        "SYNC_PATHS": ".github/scripts",
+        "EXCLUDE_PATHS": "",
+        "GITHUB_OUTPUT": str(output_file),
+        "TEMPLATE_SYNC_WORK_DIR": str(work),
+    }
+    # Invoke the child's own copy relatively, the way template-sync.yaml does.
+    result = subprocess.run(
+        ["bash", script_rel], cwd=child, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    # The child's on-disk copy was overwritten with the longer template version.
+    assert (child / script_rel).read_text().endswith(broken_tail)
