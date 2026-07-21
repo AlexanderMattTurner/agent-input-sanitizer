@@ -19,6 +19,9 @@ export default tseslint.config(
       // mutates the sources in place; never lint that transient mutated copy.
       ".stryker-tmp/**",
       "reports/**",
+      // `uv sync` materializes the Python env here; its vendored JS (regexploit,
+      // urllib3) is not ours to lint and fails no-undef under this flat config.
+      ".venv/**",
     ],
   },
   js.configs.recommended,
