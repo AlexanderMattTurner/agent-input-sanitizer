@@ -25,28 +25,47 @@ uv_install_if_missing() {
   fi
 }
 
-# Install a command via webi if missing
-# $1 = command name, $2 = optional webi package specifier (e.g. tool@version)
-# Hardened: HTTPS-only, shebang validation, version pinning via $2
-webi_install_if_missing() {
+# Install a Go-based tool at a PINNED version via `go install module@vX.Y.Z`.
+# $1 = command name, $2 = module path with an explicit @version.
+# This replaced a `curl https://webi.sh/... | sh` bootstrap, which fetched and
+# executed a dynamically generated installer with NO integrity check — a
+# fetch-and-run-remote-code supply-chain hole squarely in this repo's threat
+# model. `go install` instead pins the version AND verifies every module against
+# the Go checksum database (sum.golang.org) before building, so the bytes cannot
+# be swapped by a compromised mirror. It downloads nothing via curl/wget, so
+# there is no artifact for check-pinned-downloads to flag and no exemption.
+# Returns non-zero (without warning) when go is absent so the caller can fall
+# back to the signed-apt path.
+go_install_pinned() {
+  local cmd="$1" module="$2"
+  command -v "$cmd" &>/dev/null && return 0
+  command -v go &>/dev/null || return 1
+  go install "$module" || {
+    warn "Failed to install $cmd via go install ($module)"
+    return 1
+  }
+}
+
+# Install a command from the OS package manager if missing. apt verifies every
+# package against the distro's signed repository metadata — genuine integrity,
+# and (like go install) no curl artifact for check-pinned-downloads to flag.
+# Only possible as root on a Debian-family image; elsewhere the tool — an
+# optional dev convenience the hooks warn-and-continue without, and which CI
+# installs properly — is left uninstalled. That is strictly safer than fetching
+# and running an unverified remote installer.
+apt_updated=0
+apt_install_if_missing() {
   local cmd="$1" pkg="${2:-$1}"
-  if ! command -v "$cmd" &>/dev/null; then
-    local installer
-    installer=$(mktemp "${TMPDIR:-/tmp}/webi-${cmd}-XXXXXX.sh")
-    # webi.sh serves a per-request generated installer with no published
-    # checksum/signature; we pin HTTPS and validate the shebang below.
-    # pin-exempt: no stable digest to verify against for a dynamic installer.
-    if curl --proto '=https' -fsSL "https://webi.sh/$pkg" -o "$installer" 2>/dev/null; then
-      if head -n 1 "$installer" | grep -q '^#!'; then
-        sh "$installer" >/dev/null 2>&1 || warn "Failed to install $cmd"
-      else
-        warn "Installer for $cmd is not a shell script (missing shebang) — skipping"
-      fi
-    else
-      warn "Failed to download installer for $cmd"
-    fi
-    rm -f "$installer"
+  command -v "$cmd" &>/dev/null && return 0
+  if ! is_root || ! command -v apt-get &>/dev/null; then
+    warn "$cmd not found and cannot be auto-installed (needs root + apt); install it manually"
+    return 0
   fi
+  if [ "$apt_updated" -eq 0 ]; then
+    apt-get update -qq || warn "apt-get update failed"
+    apt_updated=1
+  fi
+  apt-get install -y -qq "$pkg" || warn "Failed to install $pkg"
 }
 
 #######################################
@@ -91,17 +110,32 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
 fi
 
+# Put the Go install bin dir on PATH so a `go install`-ed tool (shfmt) is
+# discoverable by `command -v` below and by later hooks.
+if command -v go &>/dev/null; then
+  gobin="$(go env GOBIN)"
+  [ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
+  export PATH="$gobin:$PATH"
+  if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+    echo "export PATH=\"$gobin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
+  fi
+fi
+
 #######################################
 # Tool installation (optional - warn on failure)
 #######################################
 
-# Install tools quietly — only warn on failure (versions pinned for supply-chain safety)
-webi_install_if_missing shfmt shfmt@3
-webi_install_if_missing gh gh@2
-webi_install_if_missing jq jq@1.7
-if ! command -v shellcheck &>/dev/null && is_root; then
-  { apt-get update -qq && apt-get install -y -qq shellcheck; } || warn "Failed to install shellcheck"
-fi
+# Install dev tools with a genuine integrity mechanism — never an unverified
+# remote installer. shfmt is a Go module, so pin it and let the Go checksum DB
+# verify it; fall back to signed apt if go is unavailable. gh/jq/shellcheck come
+# from apt's signed repositories. All are optional: on a non-root or non-Debian
+# host without go they are skipped with a warning, and CI installs them properly.
+# shfmt is pinned to match .pre-commit-config.yaml (shfmt v3.12.0) so local
+# lint-staged formatting matches CI.
+go_install_pinned shfmt "mvdan.cc/sh/v3/cmd/shfmt@v3.12.0" || apt_install_if_missing shfmt
+apt_install_if_missing gh
+apt_install_if_missing jq
+apt_install_if_missing shellcheck
 
 # Python projects: the pre-commit and pre-push hooks shell out to ruff, which
 # isn't a project dependency. Install it (pinned to match .pre-commit-config.yaml

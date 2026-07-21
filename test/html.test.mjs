@@ -297,13 +297,53 @@ const HIDDEN_STYLE_CASES = [
   ["display:none !\\69mportant", true], // with a space before the escaped flag
   ["display:block!\\69mportant", false], // decodes to "block!important" -> stripped -> "block", visible
   ["visibility:hi\\64 den!important", true], // escaped value AND a plain important flag
+  // ── raw fallback for declarations style-to-object cannot parse at all ──
+  // An escape in the PROPERTY NAME is valid CSS a browser applies, but a parse
+  // error to style-to-object even in isolation; the raw first-colon fallback
+  // must still detect it (previously a hidden-content bypass).
+  ["\\64 isplay:none", true], // `\64` -> 'd': browser reads `display:none`
+  ["\\76 isibility:hidden", true], // `\76` -> 'v': browser reads `visibility:hidden`
+  ["color:red;\\64 isplay:none", true], // valid decl first, escaped hider second
+  ["x;\\64 isplay:none", true], // junk decl plus escaped hider
+  ["\\64 isplay:block", false], // escaped property, visible value — stays visible
+  // Parse-breaking styles a browser would NOT hide must stay fail-open: the
+  // fallback's ident gate rejects anything a browser's tokenizer rejects.
+  ["/*x display:none", false], // unterminated comment swallows everything
+  ["dis play:none", false], // space in property name — invalid declaration
+  ["a{display:none", false], // brace junk in property name — invalid
+  ["\\3a :none", false], // property decodes to ':', not an ident
   // ── invalid escaped codepoints (spec: decode to U+FFFD, never throw) ──
   ["display:\\0", false], // codepoint 0 is invalid
   ["display:\\d800", false], // a surrogate half is invalid
   ["display:\\ffffff", false], // past the Unicode maximum (0x10FFFF)
 ];
 
+// Negative corpus for the raw-declaration fallback: realistic legitimate
+// styles — including parse-breaking ones style-to-object rejects — must
+// produce ZERO hidden verdicts, or the fallback would splice real content
+// (precision-over-recall doctrine).
+const LEGIT_STYLE_CORPUS = [
+  "color: #333; font-size: 14px; line-height: 1.5",
+  "display: flex; align-items: center; gap: 8px",
+  "background: url(https://example.com/a.png) no-repeat; padding: 1em",
+  "font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 600",
+  "--brand-color: #0af; color: var(--brand-color)",
+  "-webkit-transition: opacity 0.3s; opacity: 0.9",
+  "margin:0 auto;width:min(100%, 60ch)",
+  "content: 'a;b'; quotes: '“' '”'",
+  // Parse-breaking but benign: the fallback must not resurrect these.
+  "color: red /* trailing unterminated comment",
+  "font size: 12px; color: blue",
+  "a{color:red}",
+  "{}; color: green",
+  "12px:display",
+];
+
 describe("unit: isHiddenStyle exact verdicts", () => {
+  for (const style of LEGIT_STYLE_CORPUS)
+    it(`negative corpus: leaves ${JSON.stringify(style)}`, () =>
+      assert.equal(isHiddenStyle(style), false));
+
   for (const [style, expectedHidden] of HIDDEN_STYLE_CASES)
     it(`${expectedHidden ? "flags" : "leaves"} ${JSON.stringify(style)}`, () =>
       assert.equal(isHiddenStyle(style), expectedHidden));

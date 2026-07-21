@@ -175,3 +175,92 @@ def test_pre_commit_runs_lint_staged_directly_without_package_manager(
     assert marker.exists() and marker.read_text().strip() == "ran", (
         "pre-commit must invoke the lint-staged binary directly, not skip"
     )
+
+
+# --------------------------------------------------------------------------- #
+# pre-commit: lint-staged absent → still exits 0 (fresh clones must commit)
+# but must WARN loudly, never skip silently.
+# --------------------------------------------------------------------------- #
+
+
+def test_pre_commit_warns_when_lint_staged_missing(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path)
+    (repo / "a.txt").write_text("hello\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    path = curated_path(tmp_path, BASE_TOOLS)  # no node_modules in repo at all
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / ".hooks" / "pre-commit")],
+        cwd=repo,
+        env=base_env(path),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "lint-staged not installed" in result.stderr, (
+        "the fail-open skip must print a prominent warning, not pass silently"
+    )
+    assert "pnpm install" in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# pre-commit: staged SSOT source runs its paired guard test and blocks the
+# commit when the guard fails (map: .hooks/ssot-guard-pairs.json).
+# --------------------------------------------------------------------------- #
+
+
+def _sandbox_ssot_repo(tmp_path: Path, guard_body: str) -> Path:
+    repo = init_repo(tmp_path)
+    binp = repo / "node_modules" / ".bin"
+    binp.mkdir(parents=True)
+    fake = binp / "lint-staged"
+    fake.write_text("#!/bin/bash\nexit 0\n")
+    fake.chmod(0o755)
+    hooks = repo / ".hooks"
+    hooks.mkdir()
+    shutil.copy(REPO_ROOT / ".hooks" / "run-ssot-guards.mjs", hooks)
+    (hooks / "ssot-guard-pairs.json").write_text(
+        '{"pairs": {"data.json": ["guard.test.mjs"]}}'
+    )
+    (repo / "guard.test.mjs").write_text(guard_body)
+    (repo / "data.json").write_text("{}\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    return repo
+
+
+def _run_pre_commit_ssot(repo: Path, tmp_path: Path) -> subprocess.CompletedProcess:
+    # node for the guard runner; no pnpm/npm so lint-staged (a stub) runs via
+    # the direct-binary branch, keeping the test about the SSOT guard wiring.
+    path = curated_path(tmp_path, BASE_TOOLS + ["node"])
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / ".hooks" / "pre-commit")],
+        cwd=repo,
+        env=base_env(path),
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_pre_commit_blocks_when_paired_ssot_guard_fails(tmp_path: Path) -> None:
+    repo = _sandbox_ssot_repo(
+        tmp_path,
+        'import { test } from "node:test";\n'
+        'import assert from "node:assert";\n'
+        'test("guard", () => assert.fail("contract broken"));\n',
+    )
+    result = _run_pre_commit_ssot(repo, tmp_path)
+    assert result.returncode != 0, (
+        "a failing paired guard test must block the commit\n" + result.stderr
+    )
+    assert "SSOT guard test failed" in result.stderr
+
+
+def test_pre_commit_passes_when_paired_ssot_guard_passes(tmp_path: Path) -> None:
+    # Positive control: same wiring, green guard — proves the block above comes
+    # from the guard's verdict, not from broken plumbing.
+    repo = _sandbox_ssot_repo(
+        tmp_path,
+        'import { test } from "node:test";\ntest("guard", () => {});\n',
+    )
+    result = _run_pre_commit_ssot(repo, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "running paired guard test" in result.stderr
