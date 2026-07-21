@@ -8,6 +8,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.6] - 2026-07-21
+
+### Changed
+
+- docs(gates): call the SECRET_HINT drift guard what it is
+- test(gates): pin SECRET_HINT pre-gate to the detect-secrets SSOT
+- refactor(html): parse hidden-style CSS with css-tree instead of hand-rolled tokenizer
+
 ## [1.47.5] - 2026-07-21
 
 ### Changed
