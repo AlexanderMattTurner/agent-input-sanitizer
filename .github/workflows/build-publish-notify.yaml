@@ -23,6 +23,7 @@ on: # zizmor: ignore[dangerous-triggers]
     workflows:
       - Auto version bump and publish
       - Publish Python to PyPI (break-glass)
+      - Release canary
       - Sync from Template
 
 concurrency:
