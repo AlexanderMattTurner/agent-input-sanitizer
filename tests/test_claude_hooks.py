@@ -30,17 +30,18 @@ def set_remote(sandbox: Path, url: str) -> None:
     subprocess.run(["git", "remote", "add", "origin", url], cwd=sandbox, check=True)
 
 
-# The install section of session-setup.sh curls webi installers and shells out
-# to apt-get/uv/pnpm to fetch tools. Left unstubbed, the smoke test would reach
-# the network (non-hermetic, flaky, slow). Prepending a directory of these stubs
-# to PATH neutralizes the whole section: the tool stubs (shfmt/gh/jq/shellcheck)
-# make `command -v` succeed so their install branch is skipped, and the
-# installer stubs (curl/apt-get/uv/pnpm/npm) are local no-ops if anything still
-# invokes them. The script then runs its git/GH_REPO logic — what these tests
-# actually exercise — without a single outbound call. (This stands alone and
-# does not depend on any script-side skip flag.)
+# The install section of session-setup.sh installs tools via `go install` (shfmt)
+# and apt-get (gh/jq/shellcheck), then shells out to uv/pnpm for deps. Left
+# unstubbed, the smoke test would reach the network (non-hermetic, flaky, slow).
+# Prepending a directory of these stubs to PATH neutralizes the whole section:
+# the tool stubs (shfmt/gh/jq/shellcheck) make `command -v` succeed so their
+# install branch is skipped, and the installer stubs (go/apt-get/uv/pnpm/npm) are
+# local no-ops if anything still invokes them. The script then runs its
+# git/GH_REPO logic — what these tests actually exercise — without a single
+# outbound call. (This stands alone and does not depend on any script-side skip
+# flag.)
 _INERT_COMMANDS = (
-    "curl",
+    "go",
     "apt-get",
     "uv",
     "pnpm",
