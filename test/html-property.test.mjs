@@ -116,9 +116,18 @@ const arbitraryHtmlFragment = fc
   .map((parts) => parts.join(" "));
 
 describe("property: sanitizeHtml is idempotent", () => {
-  it("second pass changes nothing", () =>
+  it("second pass changes nothing AND pass one actually splices a hidden node", () =>
     checkProperty(arbitraryHtmlFragment, (input) => {
-      const passOne = applyHtml(input);
+      // Idempotence is vacuously true for a no-op, so wrap the fuzzed body in a
+      // guaranteed-hidden element and assert pass one removed it: the visible
+      // marker survives, the secret does not, and a HIDDEN_PLACEHOLDER appears.
+      // That positive postcondition proves the splice path ran; then assert the
+      // second pass is a fixed point.
+      const planted = `VISIBLE_MARK <div style="display:none">SECRET_PAYLOAD</div> ${input}`;
+      const passOne = applyHtml(planted);
+      assert.ok(passOne.includes("VISIBLE_MARK"));
+      assert.ok(!passOne.includes("SECRET_PAYLOAD"));
+      assert.ok(passOne.includes(HIDDEN_PLACEHOLDER));
       assert.equal(applyHtml(passOne), passOne);
     }));
 });

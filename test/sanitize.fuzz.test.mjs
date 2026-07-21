@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import fc from "fast-check";
 
 import { sanitize } from "../src/index.mjs";
+import { HIDDEN_PLACEHOLDER } from "../src/html.mjs";
 import { fcRunOptions, cp } from "./test-helpers.mjs";
 
 const INVISIBLE_VALUES = [
@@ -117,10 +118,18 @@ describe("fuzz: crash resistance and no silent suppression", () => {
     );
   });
 
-  it("processes a huge flat input without throwing", async () => {
-    const huge = scaleTo("pre [t](/p?c=x) post _ok_ ", 50_000);
+  it("processes a huge flat input without throwing AND still splices a hidden node buried in it", async () => {
+    // A type/length-only assertion passes even if the huge input silently
+    // defeated the HTML layer (e.g. a size bail-out), so bury a guaranteed-
+    // hidden element deep inside and assert it was still spliced: its secret is
+    // gone, a placeholder replaced it, and the change carried a warning.
+    const filler = scaleTo("pre [t](/p?c=x) post _ok_ ", 50_000);
+    const huge = `${filler}<div style="display:none">SECRETHUGE</div>${filler}`;
     const result = await sanitize(huge, { html: true });
     assert.equal(typeof result.cleaned, "string");
     assert.ok(result.cleaned.length > 0);
+    assert.ok(!result.cleaned.includes("SECRETHUGE"));
+    assert.ok(result.cleaned.includes(HIDDEN_PLACEHOLDER));
+    assert.ok(result.warnings.length > 0);
   });
 });

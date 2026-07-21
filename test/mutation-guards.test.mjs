@@ -228,6 +228,57 @@ describe("guard: sanitizeHtml counts comments and hidden into the right buckets"
   });
 });
 
+// ─── html.mjs: browser-honored hides splice/flag end-to-end (exact output) ────
+// The isHiddenStyle unit suite pins the predicate; these drive the FULL splice
+// path so a mutant that keeps the verdict but drops the removal is caught. Each
+// style is a genuine browser-honored hide that older code missed; the secret
+// must be gone, replaced by exactly HIDDEN_PLACEHOLDER, marker text intact.
+
+describe("guard: browser-honored hides are spliced end-to-end", () => {
+  const BROWSER_HONORED_HIDES = [
+    ["named same-color", "color:blue;background:blue"],
+    ["font shorthand size 0", "font:0px/1 serif"],
+    ["relative offscreen", "position:relative;left:-9999px"],
+    ["turn rotate edge-on", "transform:rotateX(0.25turn)"],
+    ["grad rotate edge-on", "transform:rotateY(100grad)"],
+    ["near-zero overflow dim", "overflow:hidden;height:0.0001px"],
+  ];
+  for (const [label, style] of BROWSER_HONORED_HIDES)
+    it(`splices ${label} to exactly the placeholder`, () => {
+      const result = sanitizeHtml(
+        `MARK <div style="${style}">SECRET</div> END`,
+      );
+      assert.equal(result.text, `MARK ${HIDDEN_PLACEHOLDER} END`);
+      assert.deepEqual(result.removed, { comments: 0, hidden: 1 });
+    });
+
+  it("flags a tab-split javascript: URI as script-executing", () =>
+    assert.equal(
+      checkExfilUrl("java\tscript:alert(1)"),
+      "script-executing URI",
+    ));
+
+  // Precision: a legit gradient heading (`color:transparent` painted through a
+  // background-clip:text gradient) and ordinary visible colored text must NOT
+  // be spliced — the output is byte-for-byte the input (no placeholder).
+  for (const [label, style] of [
+    [
+      "gradient heading",
+      "color:transparent;-webkit-background-clip:text;background:linear-gradient(blue,red)",
+    ],
+    ["visible colored text", "color:blue;background:white"],
+  ])
+    it(`leaves ${label} untouched (precision)`, () => {
+      const input = `KEEP <div style="${style}">VISIBLE</div> DONE`;
+      const result = sanitizeHtml(input);
+      // sanitizeHtml returns null when nothing was removed/warned.
+      if (result !== null) {
+        assert.ok(result.text.includes("VISIBLE"));
+        assert.ok(!result.text.includes(HIDDEN_PLACEHOLDER));
+      }
+    });
+});
+
 // ─── html.mjs: rawParams name lowercasing + value splitting ───────────────────
 // A `name=value` exfil param must be matched case-insensitively, and the value
 // (everything after the first `=`) preserved verbatim including any `=`.
