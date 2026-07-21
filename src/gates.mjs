@@ -30,7 +30,15 @@ export const MD_LINK_HINT = /\]\(|!\[|^[ \t]*\[[^[\]\n]+\]:\s/m;
 
 // ─── Secret-shape pre-gate (Layer 3 URL-param reuse) ─────────────────────────
 // Cheap shape match that decides whether a URL parameter value carries a
-// credential (Layer 3). Split across TWO regexes, combined by matchesSecretHint:
+// credential (Layer 3). This is a deliberately BROADER, shorter-run superset of
+// the Python detect-secrets SSOT (python/.../secret-detectors.json): it adds
+// keyword and non-detector shapes (AWS `AKIA…`, JWT `eyJ…`, Slack `xox…`, …) and
+// trims each opaque run for ReDoS-safety, so it can't be a literal projection of
+// that JSON (which also isn't shipped in the npm `files`). The invariant that
+// every SSOT detector is still covered here is enforced by the contract test in
+// test/secret-detectors-portability.test.mjs — extend SECRET_HINT when adding a
+// detector there, or that test fails.
+// Split across TWO regexes, combined by matchesSecretHint:
 // one alternation of every arm makes a redos analyzer see cross-arm polynomial
 // backtracking (each arm is linear alone, but the union was a 3rd-degree
 // polynomial on a long alnum run). Testing two independently-safe literals with
