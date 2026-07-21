@@ -244,6 +244,12 @@ function isPositionedOffscreen(val) {
 // var()/inherit/currentColor are deliberately absent: they resolve via the
 // cascade and must fail OPEN, handled by isConcreteColor at the compare.
 /** @type {Record<string, string>} */
+// Stryker disable all — static CSS color data table (147 canonical name→hex
+// entries). Mutating each hex/name literal yields hundreds of low-value,
+// largely-equivalent mutants (no test can meaningfully pin every color) that
+// balloon the html shard past its CI timeout. The canonicalization LOGIC that
+// consumes this table stays under mutation. Same idiom as the Unicode data
+// tables in standardized-variants.mjs/joining-type.mjs/cf-charset.mjs.
 const NAMED_COLORS = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -395,6 +401,7 @@ const NAMED_COLORS = {
   yellow: "#ffff00",
   yellowgreen: "#9acd32",
 };
+// Stryker restore all
 
 /**
  * True when a canonicalized color is a concrete value we can compare for
