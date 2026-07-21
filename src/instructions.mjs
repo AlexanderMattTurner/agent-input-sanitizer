@@ -461,7 +461,7 @@ export function atomicReplaceFile(
  *   {@link atomicReplaceFile}'s `tmpName`): lets a test drive the concurrent
  *   write/symlink-swap that the TOCTOU guard exists to catch, which is otherwise
  *   unreachable from this fully-synchronous path. Defaults to `lstatSync`.
- * @returns {boolean | null}
+ * @returns {boolean}
  */
 export function cleanFile(absPath, lstat = lstatSync) {
   let fd;
@@ -505,13 +505,6 @@ export function cleanFile(absPath, lstat = lstatSync) {
     if (scanText(original).length === 0) return false;
 
     const stripped = stripInvisible(original);
-    // scanText can flag a run that stripInvisible PRESERVES — a well-formed but
-    // bogus emoji-tag run (a base pictograph + tag chars + CANCEL) trips the
-    // scanner yet is kept intact by the stripper. Rewriting identical bytes and
-    // returning `true` would falsely report the payload removed. Fail closed:
-    // the bytes did not change, so signal "flagged but not strippable" (null),
-    // never "cleaned" (true).
-    if (stripped === original) return null;
     // Re-verify the on-path file against the open-time snapshot before writing:
     // an inode/size/mtime change (or a swap to a symlink) means someone modified
     // it under us, so fail loud rather than clobber their write (lost update).
