@@ -8,6 +8,18 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.4] - 2026-07-21
+
+### Changed
+
+- fix(security): replace unverified webi curl|sh bootstrap with pinned, verified installs
+- chore(lint): ignore the uv-managed .venv in eslint
+- docs(claude): check open PRs before fixing a red main
+- ci: add a daily release canary that alerts on npm/tag/changelog drift
+- chore(hooks): run paired SSOT guard tests at commit time; warn on skipped lint-staged
+- test(redos): extend the static ReDoS guard to every src/*.mjs regex
+- fix(html): detect hidden styles whose property name is CSS-escaped
+
 ## [1.47.3] - 2026-07-21
 
 ### Changed
