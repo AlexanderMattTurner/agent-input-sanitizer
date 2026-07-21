@@ -8,6 +8,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.0] - 2026-07-21
+
+### Changed
+
+- style(textstrip): collapse monkeypatch call to one line
+- fix(textstrip): union pinned charset with live Cf so neither Unicode skew under-strips
+- style(textstrip): apply ruff-format to test module
+- feat(textstrip): add stdlib-only ANSI+invisible strip for no-Node consumers
+
 ## [1.46.0] - 2026-07-19
 
 ### Changed
