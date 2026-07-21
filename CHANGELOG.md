@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.7] - 2026-07-21
+
+### Changed
+
+- ci: re-exec template-sync from immutable copy and add self-overwrite regression test
+
 ## [1.47.6] - 2026-07-21
 
 ### Changed
