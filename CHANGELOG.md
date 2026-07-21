@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.5] - 2026-07-21
+
+### Changed
+
+- test(html): exclude the static NAMED_COLORS table from mutation
+- fix(html): close browser-honored hidden-content detection gaps
+
 ## [1.47.4] - 2026-07-21
 
 ### Changed

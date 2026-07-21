@@ -93,54 +93,62 @@ const rep = (/** @type {number} */ n) => "A".repeat(n);
 const hex = (/** @type {number} */ n) =>
   "a1b2".repeat(Math.ceil(n / 4)).slice(0, n);
 
-// const -> a string that matches that detector's pattern AND is a realistic
-// credential-shaped value. Keep in lockstep with the SSOT via the assertions
-// below (never hand-loosen an example to dodge a failure — fix the pre-gate).
+// `${const}[${patternIndex}]` -> a string that matches THAT pattern and is a
+// realistic credential-shaped value. Keyed per PATTERN, not per detector, so a
+// detector with several distinct shapes (e.g. GitLab's glpat-/glcbt-) is covered
+// shape-by-shape. Keep in lockstep with the SSOT via the assertions below (never
+// hand-loosen an example to dodge a failure — extend the pre-gate instead).
 /** @type {Record<string, string>} */
-const DETECTOR_EXAMPLES = {
-  AnthropicApiKeyDetector: `sk-ant-api03-${rep(93)}AA`,
-  GoogleApiKeyDetector: `AIza${rep(35)}`,
-  DigitalOceanTokenDetector: `dop_v1_${hex(64)}`,
-  CloudflareOriginCaKeyDetector: `v1.0-${hex(24)}-${hex(146)}`,
-  VaultTokenDetector: `hvs.${rep(90)}`,
-  HashiCorpTerraformTokenDetector: `${rep(14)}.atlasv1.${rep(60)}`,
-  GitHubFineGrainedPatDetector: `github_pat_${rep(82)}`,
-  OpenRouterApiKeyDetector: `sk-or-v1-${hex(64)}`,
-  GroqApiKeyDetector: `gsk_${rep(32)}`,
-  XaiApiKeyDetector: `xai-${rep(40)}`,
-  ReplicateApiTokenDetector: `r8_${rep(37)}`,
-  GitHubClassicTokenDetector: `ghp_${rep(36)}`,
-  GitLabAccessTokenDetector: `glpat-${rep(30)}`,
+const PATTERN_EXAMPLES = {
+  "AnthropicApiKeyDetector[0]": `sk-ant-api03-${rep(93)}AA`,
+  "GoogleApiKeyDetector[0]": `AIza${rep(35)}`,
+  "DigitalOceanTokenDetector[0]": `dop_v1_${hex(64)}`,
+  "CloudflareOriginCaKeyDetector[0]": `v1.0-${hex(24)}-${hex(146)}`,
+  "VaultTokenDetector[0]": `hvs.${rep(90)}`,
+  "HashiCorpTerraformTokenDetector[0]": `${rep(14)}.atlasv1.${rep(60)}`,
+  "GitHubFineGrainedPatDetector[0]": `github_pat_${rep(82)}`,
+  "OpenRouterApiKeyDetector[0]": `sk-or-v1-${hex(64)}`,
+  "GroqApiKeyDetector[0]": `gsk_${rep(32)}`,
+  "XaiApiKeyDetector[0]": `xai-${rep(40)}`,
+  "ReplicateApiTokenDetector[0]": `r8_${rep(37)}`,
+  "GitHubClassicTokenDetector[0]": `ghp_${rep(36)}`,
+  "GitLabAccessTokenDetector[0]": `glpat-${rep(30)}`,
+  "GitLabAccessTokenDetector[1]": `glcbt-ab_${rep(30)}`,
 };
 
-describe("JS pre-gate covers every detect-secrets SSOT detector", () => {
-  it("example map covers exactly the live detector set (no missing/stale)", () => {
-    const liveConsts = detectors.map((d) => d.const).sort();
-    const mappedConsts = Object.keys(DETECTOR_EXAMPLES).sort();
+// [label, pattern, example] for every pattern in the SSOT, so completeness and
+// coverage are enforced pattern-by-pattern.
+const PATTERN_CASES = detectors.flatMap((d) =>
+  d.patterns.map((p, i) => {
+    const label = `${d.const}[${i}]`;
+    return [label, p, PATTERN_EXAMPLES[label]];
+  }),
+);
+
+describe("JS pre-gate covers every detect-secrets SSOT pattern", () => {
+  it("example map covers exactly the live pattern set (no missing/stale)", () => {
+    const liveLabels = PATTERN_CASES.map(([label]) => label).sort();
+    const mappedLabels = Object.keys(PATTERN_EXAMPLES).sort();
     assert.deepEqual(
-      mappedConsts,
-      liveConsts,
-      "DETECTOR_EXAMPLES must map exactly the detectors in secret-detectors.json — a mismatch means a detector was added/removed without wiring the JS SECRET_HINT pre-gate",
+      mappedLabels,
+      liveLabels,
+      "PATTERN_EXAMPLES must map exactly the patterns in secret-detectors.json — a mismatch means a detector/pattern was added or removed without wiring the JS SECRET_HINT pre-gate",
     );
   });
 
-  for (const detector of detectors) {
-    const example = DETECTOR_EXAMPLES[detector.const];
-    it(`${detector.const}: example matches its SSOT pattern (non-vacuity)`, () => {
-      assert.ok(example !== undefined, `no example for ${detector.const}`);
-      const matched = detector.patterns.some((/** @type {string} */ p) =>
-        new RegExp(p).test(example),
-      );
+  for (const [label, pattern, example] of PATTERN_CASES) {
+    it(`${label}: example matches its SSOT pattern (non-vacuity)`, () => {
+      assert.ok(example !== undefined, `no example for ${label}`);
       assert.ok(
-        matched,
-        `example for ${detector.const} no longer matches its detector pattern(s) — update the example to a real match`,
+        new RegExp(pattern).test(example),
+        `example for ${label} no longer matches its detector pattern — update the example to a real match`,
       );
     });
 
-    it(`${detector.const}: a matching credential trips matchesSecretHint`, () => {
+    it(`${label}: a matching credential trips matchesSecretHint`, () => {
       assert.ok(
         matchesSecretHint(example),
-        `SECRET_HINT does not cover ${detector.const} — add its shape to gates.mjs so the Layer-3 URL-exfil pre-gate can't silently miss a credential type the SSOT recognizes`,
+        `SECRET_HINT does not cover ${label} — add its shape to gates.mjs so the Layer-3 URL-exfil pre-gate can't silently miss a credential shape the SSOT recognizes`,
       );
     });
   }

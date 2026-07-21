@@ -91,6 +91,8 @@ const ABSOLUTE_UNITS = new Set([
   "mm",
 ]);
 const VIEWPORT_UNITS = new Set(["vw", "vh", "vmin", "vmax"]);
+// Angle units for rotateX/rotateY, normalized to degrees by hueDegrees.
+const ANGLE_UNITS = new Set(["deg", "grad", "rad", "turn"]);
 
 /**
  * The meaningful value tokens of a css-tree Value or Function node — its direct
@@ -214,13 +216,25 @@ function isHidingTransform(node) {
       if (first && Math.abs(parseFloat(first.value)) < NEAR_ZERO_EPSILON)
         return true;
     } else if (name === "rotatex" || name === "rotatey") {
-      // Only the axis-specific rotations collapse to a line; a plain
-      // rotate()/rotateZ() spins in-plane and stays visible. Non-`deg` angle
-      // units fail open (unresolved).
+      // An axis rotation collapses the box to a line at an odd quarter-turn.
+      // Only the axis-specific rotations collapse; a plain rotate()/rotateZ()
+      // spins in-plane and stays visible. The angle needs an explicit unit (a
+      // unitless nonzero angle is invalid CSS a browser drops); hueDegrees
+      // normalizes deg/grad/rad/turn to [0,360), and a near-90/270 band absorbs
+      // the float drift of rad→deg.
       const a = args[0];
-      if (a && a.type === "Dimension" && a.unit === "deg") {
-        const degrees = ((parseFloat(a.value) % 360) + 360) % 360;
-        if (degrees === 90 || degrees === 270) return true;
+      if (
+        a &&
+        a.type === "Dimension" &&
+        ANGLE_UNITS.has(a.unit.toLowerCase())
+      ) {
+        const degrees = hueDegrees(`${a.value}${a.unit}`.toLowerCase());
+        if (
+          degrees !== null &&
+          (Math.abs(degrees - 90) < NEAR_ZERO_EPSILON ||
+            Math.abs(degrees - 270) < NEAR_ZERO_EPSILON)
+        )
+          return true;
       }
     } else if (
       name === "translate" ||
@@ -313,22 +327,186 @@ function isClipRectHidden(node) {
  * @returns {boolean}
  */
 function isPositionedOffscreen(nodeOf, textOf) {
-  if (!/\babsolute\b|\bfixed\b/.test(textOf("position"))) return false;
+  const position = textOf("position");
+  // `relative`/`sticky` shift the rendered box off its normal spot just like
+  // `absolute`/`fixed` do, so a `left:-9999px` on any of them pushes the text
+  // off any viewport. `static` ignores offsets and is excluded.
+  if (!/\babsolute\b|\bfixed\b|\brelative\b|\bsticky\b/.test(position))
+    return false;
   for (const side of ["left", "top", "right", "bottom"])
     if (isOffscreenOffset(nodeOf(side))) return true;
+  // The legacy `clip` property only clips ABSOLUTELY-positioned boxes
+  // (absolute/fixed); a relative/sticky element ignores it, so reading its
+  // rect() as a hide there would splice visible text (fail open).
+  if (!/\babsolute\b|\bfixed\b/.test(position)) return false;
   return isClipRectHidden(nodeOf("clip"));
 }
 
-// CSS named colors that participate in a white-on-white / black-on-black style
-// of hiding. The full named-color set is unnecessary — only colors that
-// commonly back hidden text need a canonical form for the equality compare.
+// The full CSS named-color set canonicalized to `#rrggbb`, so any two identical
+// resolvable named colors (`color:blue;background:blue`) — not just the handful
+// that back white-on-white text — compare equal for the same-color hide test.
+// `transparent` maps to itself (the sentinel isConcreteColor also accepts).
+// var()/inherit/currentColor are deliberately absent: they resolve via the
+// cascade and must fail OPEN, handled by isConcreteColor at the compare.
 /** @type {Record<string, string>} */
+// Stryker disable all — static CSS color data table (147 canonical name→hex
+// entries). Mutating each hex/name literal yields hundreds of low-value,
+// largely-equivalent mutants (no test can meaningfully pin every color) that
+// balloon the html shard past its CI timeout. The canonicalization LOGIC that
+// consumes this table stays under mutation. Same idiom as the Unicode data
+// tables in standardized-variants.mjs/joining-type.mjs/cf-charset.mjs.
 const NAMED_COLORS = {
-  white: "#ffffff",
+  aliceblue: "#f0f8ff",
+  antiquewhite: "#faebd7",
+  aqua: "#00ffff",
+  aquamarine: "#7fffd4",
+  azure: "#f0ffff",
+  beige: "#f5f5dc",
+  bisque: "#ffe4c4",
   black: "#000000",
+  blanchedalmond: "#ffebcd",
+  blue: "#0000ff",
+  blueviolet: "#8a2be2",
+  brown: "#a52a2a",
+  burlywood: "#deb887",
+  cadetblue: "#5f9ea0",
+  chartreuse: "#7fff00",
+  chocolate: "#d2691e",
+  coral: "#ff7f50",
+  cornflowerblue: "#6495ed",
+  cornsilk: "#fff8dc",
+  crimson: "#dc143c",
+  cyan: "#00ffff",
+  darkblue: "#00008b",
+  darkcyan: "#008b8b",
+  darkgoldenrod: "#b8860b",
+  darkgray: "#a9a9a9",
+  darkgreen: "#006400",
+  darkgrey: "#a9a9a9",
+  darkkhaki: "#bdb76b",
+  darkmagenta: "#8b008b",
+  darkolivegreen: "#556b2f",
+  darkorange: "#ff8c00",
+  darkorchid: "#9932cc",
+  darkred: "#8b0000",
+  darksalmon: "#e9967a",
+  darkseagreen: "#8fbc8f",
+  darkslateblue: "#483d8b",
+  darkslategray: "#2f4f4f",
+  darkslategrey: "#2f4f4f",
+  darkturquoise: "#00ced1",
+  darkviolet: "#9400d3",
+  deeppink: "#ff1493",
+  deepskyblue: "#00bfff",
+  dimgray: "#696969",
+  dimgrey: "#696969",
+  dodgerblue: "#1e90ff",
+  firebrick: "#b22222",
+  floralwhite: "#fffaf0",
+  forestgreen: "#228b22",
+  fuchsia: "#ff00ff",
+  gainsboro: "#dcdcdc",
+  ghostwhite: "#f8f8ff",
+  gold: "#ffd700",
+  goldenrod: "#daa520",
+  gray: "#808080",
+  green: "#008000",
+  greenyellow: "#adff2f",
+  grey: "#808080",
+  honeydew: "#f0fff0",
+  hotpink: "#ff69b4",
+  indianred: "#cd5c5c",
+  indigo: "#4b0082",
+  ivory: "#fffff0",
+  khaki: "#f0e68c",
+  lavender: "#e6e6fa",
+  lavenderblush: "#fff0f5",
+  lawngreen: "#7cfc00",
+  lemonchiffon: "#fffacd",
+  lightblue: "#add8e6",
+  lightcoral: "#f08080",
+  lightcyan: "#e0ffff",
+  lightgoldenrodyellow: "#fafad2",
+  lightgray: "#d3d3d3",
+  lightgreen: "#90ee90",
+  lightgrey: "#d3d3d3",
+  lightpink: "#ffb6c1",
+  lightsalmon: "#ffa07a",
+  lightseagreen: "#20b2aa",
+  lightskyblue: "#87cefa",
+  lightslategray: "#778899",
+  lightslategrey: "#778899",
+  lightsteelblue: "#b0c4de",
+  lightyellow: "#ffffe0",
+  lime: "#00ff00",
+  limegreen: "#32cd32",
+  linen: "#faf0e6",
+  magenta: "#ff00ff",
+  maroon: "#800000",
+  mediumaquamarine: "#66cdaa",
+  mediumblue: "#0000cd",
+  mediumorchid: "#ba55d3",
+  mediumpurple: "#9370db",
+  mediumseagreen: "#3cb371",
+  mediumslateblue: "#7b68ee",
+  mediumspringgreen: "#00fa9a",
+  mediumturquoise: "#48d1cc",
+  mediumvioletred: "#c71585",
+  midnightblue: "#191970",
+  mintcream: "#f5fffa",
+  mistyrose: "#ffe4e1",
+  moccasin: "#ffe4b5",
+  navajowhite: "#ffdead",
+  navy: "#000080",
+  oldlace: "#fdf5e6",
+  olive: "#808000",
+  olivedrab: "#6b8e23",
+  orange: "#ffa500",
+  orangered: "#ff4500",
+  orchid: "#da70d6",
+  palegoldenrod: "#eee8aa",
+  palegreen: "#98fb98",
+  paleturquoise: "#afeeee",
+  palevioletred: "#db7093",
+  papayawhip: "#ffefd5",
+  peachpuff: "#ffdab9",
+  peru: "#cd853f",
+  pink: "#ffc0cb",
+  plum: "#dda0dd",
+  powderblue: "#b0e0e6",
+  purple: "#800080",
+  rebeccapurple: "#663399",
   red: "#ff0000",
+  rosybrown: "#bc8f8f",
+  royalblue: "#4169e1",
+  saddlebrown: "#8b4513",
+  salmon: "#fa8072",
+  sandybrown: "#f4a460",
+  seagreen: "#2e8b57",
+  seashell: "#fff5ee",
+  sienna: "#a0522d",
+  silver: "#c0c0c0",
+  skyblue: "#87ceeb",
+  slateblue: "#6a5acd",
+  slategray: "#708090",
+  slategrey: "#708090",
+  snow: "#fffafa",
+  springgreen: "#00ff7f",
+  steelblue: "#4682b4",
+  tan: "#d2b48c",
+  teal: "#008080",
+  thistle: "#d8bfd8",
+  tomato: "#ff6347",
   transparent: "transparent",
+  turquoise: "#40e0d0",
+  violet: "#ee82ee",
+  wheat: "#f5deb3",
+  white: "#ffffff",
+  whitesmoke: "#f5f5f5",
+  yellow: "#ffff00",
+  yellowgreen: "#9acd32",
 };
+// Stryker restore all
 
 /**
  * True when a canonicalized color is a concrete value we can compare for
@@ -621,17 +799,32 @@ function isTextPaintedVisible(val) {
  */
 function isOverflowHidden(nodeOf, textOf) {
   if (textOf("overflow") !== "hidden") return false;
-  for (const dim of ["height", "width", "max-height", "max-width"]) {
-    const token = soleToken(nodeOf(dim));
-    if (
-      token &&
-      (token.type === "Number" ||
-        token.type === "Dimension" ||
-        token.type === "Percentage") &&
-      parseFloat(token.value) === 0
-    )
-      return true;
-  }
+  for (const dim of ["height", "width", "max-height", "max-width"])
+    // Near-zero (epsilon band), not exact 0, so `height:0.0001px` still counts —
+    // matching the standalone size checks a browser renders as invisible.
+    if (isNearZeroLength(nodeOf(dim))) return true;
+  return false;
+}
+
+// The length units that denote a font-size in a `font` SHORTHAND. Only a length
+// with one of these units is a size (a bare number there is a weight, a `%` a
+// stretch), so those never misread as a zero size. `q` (quarter-mm) is a font
+// length unit too, though it never gates an offset above.
+const FONT_SIZE_UNITS = new Set([...ABSOLUTE_UNITS, "q"]);
+
+/**
+ * True when a `font` SHORTHAND's font-size collapses the text to nothing. The
+ * font-size is the FIRST length token in the shorthand (it precedes an optional
+ * `/line-height` and the family); a near-zero one hides the text just like the
+ * `font-size` longhand.
+ * @param {any} node value node for `font`
+ * @returns {boolean}
+ */
+function isFontShorthandHidden(node) {
+  if (!node) return false;
+  for (const token of valueTokens(node))
+    if (token.type === "Dimension" && FONT_SIZE_UNITS.has(token.unit))
+      return Math.abs(parseFloat(token.value)) < NEAR_ZERO_EPSILON;
   return false;
 }
 
@@ -693,27 +886,19 @@ function parseDeclarations(styleStr) {
       parseCustomProperty: false,
       onParseError() {},
     });
-    /* c8 ignore start -- defensive: css-tree's parser with a swallowing
-       onParseError recovers rather than throwing on CSS input, so this fail-open
-       is here only to uphold the module's never-throws contract. */
+    /* c8 ignore start -- the only reachable throw path is a non-string / deeply
+       pathological input (css-tree's onParseError recovers ordinary bad CSS);
+       this fail-open upholds the module's never-throws contract for those. */
   } catch {
-    // css-tree failing outright is unresolvable input — fail open (visible).
     return decls;
   }
   /* c8 ignore stop */
   csstree.walk(ast, {
     visit: "Declaration",
     enter(/** @type {any} */ node) {
-      /* c8 ignore start -- defensive: `node.property` is always a real ident
-         token here, so ident.decode does not throw; fail-open on the contract. */
-      let decoded;
-      try {
-        decoded = csstree.ident.decode(node.property);
-      } catch {
-        return;
-      }
-      /* c8 ignore stop */
-      const property = decoded.trim().toLowerCase();
+      // ident.decode is pure string iteration and cannot throw on a real ident
+      // token; property is escape-decoded then gated to a clean CSS ident.
+      const property = csstree.ident.decode(node.property).trim().toLowerCase();
       if (!CSS_PROPERTY_IDENT_RE.test(property)) return;
       decls.set(property, node.value);
     },
@@ -765,6 +950,9 @@ export function isHiddenStyle(styleStr) {
   // DOES hide content — gated on `overflow:hidden` also being present.
   // `font-size:0`, in contrast, reliably collapses text to nothing on its own.
   if (isNearZeroLength(nodeOf("font-size"))) return true;
+  // The `font` shorthand also carries the font-size, so a `font:0px/1 serif`
+  // collapses text just like the longhand — check its size token too.
+  if (isFontShorthandHidden(nodeOf("font"))) return true;
 
   if (isPositionedOffscreen(nodeOf, textOf)) return true;
 
@@ -1705,13 +1893,17 @@ function checkUrlPath(parsed) {
  * @returns {string | null}
  */
 export function checkExfilUrl(url) {
-  if (/^\s*data:/i.test(url)) {
-    if (DATA_URI_ACTIVE_RE.test(url)) return "active-content data: URI";
+  // A browser strips tab/newline/CR ANYWHERE in a URL before resolving its
+  // scheme, so `java\tscript:alert(1)` navigates as `javascript:`. Strip them
+  // for the scheme tests (the payload/length checks below keep the raw string).
+  const schemeUrl = url.replace(/[\t\n\r]/g, "");
+  if (/^\s*data:/i.test(schemeUrl)) {
+    if (DATA_URI_ACTIVE_RE.test(schemeUrl)) return "active-content data: URI";
     if (url.length > DATA_URI_LENGTH_THRESHOLD)
       return "oversized inline data: payload";
     return null;
   }
-  if (SCRIPT_URI_RE.test(url)) return "script-executing URI";
+  if (SCRIPT_URI_RE.test(schemeUrl)) return "script-executing URI";
   // Template-injection shapes (`${…}`, `{{…}}`) only in the query/fragment: a
   // brace in the PATH or host is a legitimate templated doc URL
   // (`/api/{{version}}/guide`), and flagging it both false-positives and
