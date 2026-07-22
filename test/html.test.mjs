@@ -203,6 +203,17 @@ const HIDDEN_STYLE_CASES = [
   ["transform:scale(1e3)", false], // exponent enlarges — visible, not near-zero
   ["transform:scale(1e0)", false], // 1e0 === 1, visible
   ["transform:matrix(0,0,0,0,0,0)", true],
+  // Multi-arg Y-axis collapse (bug: only the FIRST scale factor was tested, so
+  // scaleX=1 masked a scaleY=0).
+  ["transform:scale(1,0)", true], // Y collapsed, X visible
+  ["transform:scale(0,1)", true], // X collapsed
+  ["transform:scale3d(1,0,1)", true], // Y collapsed in 3d
+  ["transform:matrix(1,0,0,0,0,0)", true], // d (scaleY) = 0
+  ["transform:matrix3d(1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1)", true], // m22 (scaleY) = 0
+  ["transform:scale(1,1)", false], // both axes visible — not hidden
+  // matrix3d IDENTITY must NOT read as hidden: m14 (index 3) is legitimately 0,
+  // so a naive "index 3 is scaleY" check would false-positive here.
+  ["transform:matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)", false],
   ["transform:rotateY(90deg)", true], // edge-on (bug: not detected)
   ["transform:rotateX(90deg)", true],
   ["transform:rotateY(-90deg)", true],
@@ -253,6 +264,20 @@ const HIDDEN_STYLE_CASES = [
   ["color:rebeccapurple;background-color:rebeccapurple", true],
   ["color:blue;background:white", false], // distinct named colors — visible text (precision)
   ["color:navy;background:blue", false], // near but not equal — visible
+  // ── background-image layer defeats the same-color hide (bug: background-color
+  //    longhand path ignored a co-declared background-image, splicing visible
+  //    text painted over the image) ──
+  ["color:#fff;background-color:#fff;background-image:url(x.png)", false],
+  [
+    "color:#fff;background-color:#fff;background-image:linear-gradient(#000,#111)",
+    false,
+  ],
+  ["color:#fff;background:#fff url(x.png)", false], // shorthand image layer (already handled)
+  ["color:#fff;background-color:#fff;background-image:none", true], // explicit none is not a layer — still hidden
+  // ── -webkit-text-fill-color overrides `color` for the painted glyphs (bug:
+  //    same-color branch compared the raw `color`, not the effective fill) ──
+  ["color:#fff;-webkit-text-fill-color:#000;background:#fff", false], // black text on white — visible
+  ["color:#000;-webkit-text-fill-color:#fff;background:#fff", true], // white fill on white — hidden
   // CSS Color 4 notations canonicalize for the same-color compare.
   ["color:rgb(255 255 255);background:white", true], // space-separated rgb
   ["color:rgb(100% 100% 100%);background:#fff", true], // percentage channels
@@ -467,6 +492,22 @@ describe("unit: checkExfilUrl exact verdicts", () => {
       checkExfilUrl("https://e.com/p?note={{SECRET}}"),
       "suspicious query parameter",
     ));
+  it("flags a url-safe base64 beacon whose scattered -/_ break every 40-char run (mixed case+digit)", () => {
+    // 11 mixed-case+digit chunks joined by '-': longest alnum run is 10 (<40), so
+    // the old contiguous-run gate missed it; total query < 200 so it is not
+    // caught by the length rule either. The character-mix test flags it.
+    const scattered = Array(11).fill("Ab3xYz9Qw2").join("-"); // 120 chars, run<=10
+    assert.ok(scattered.length < 200 && !/[A-Za-z0-9]{40}/.test(scattered));
+    assert.equal(
+      checkExfilUrl("https://e.com/p?d=" + scattered),
+      "suspicious query parameter",
+    );
+  });
+  it("does NOT flag a long lowercase hyphenated word-slug (precision: no upper/digit)", () => {
+    const slug = Array(11).fill("secrethistory").join("-"); // 153 chars, all [a-z-]
+    assert.ok(slug.length < 200);
+    assert.equal(checkExfilUrl("https://e.com/p?d=" + slug), null);
+  });
   it("flags a query exactly past the length threshold (201), not at it (200)", () => {
     assert.equal(
       checkExfilUrl("https://e.com/p?n=" + "-".repeat(198)),
