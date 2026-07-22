@@ -25,7 +25,6 @@ import {
   countPayloadInvisible,
   stripInvisible,
   isSgrOnly,
-  SGR_RE,
 } from "./invisible.mjs";
 import { stripAnsiFully } from "./layer1.mjs";
 
@@ -44,17 +43,17 @@ const ANSI_INTRODUCER = /[\u001b\u0080-\u009f]/;
 
 /**
  * True when every ANSI introducer in `prompt` belongs to a display-only SGR
- * color sequence -- the note carve-out's precondition. `isSgrOnly` covers the
- * 7-bit ESC and C1 CSI introducers but is blind to the C1 OSC introducer
- * (U+009D), so a `U+009D 0;title BEL` prompt slips its check and is mis-read as
- * SGR-only; re-test the SGR-stripped prompt against the full introducer set so
- * a residual C1-OSC (or any non-SGR escape) denies the note and falls through
- * to block.
+ * color sequence -- the note carve-out's precondition. `isSgrOnly` already tests
+ * the SGR-stripped prompt against the WHOLE C1 control block (U+0080-U+009F,
+ * which includes the C1 OSC introducer U+009D and DCS/SOS/PM/APC) plus the 7-bit
+ * ESC, so a residual C1-OSC or any non-SGR escape already denies it — no
+ * separate re-check is needed (an earlier `&& !ANSI_INTRODUCER.test(...)` here
+ * was an exact duplicate of that gate over the same stripped string).
  * @param {string} prompt
  * @returns {boolean}
  */
 function isSgrColorOnly(prompt) {
-  return isSgrOnly(prompt) && !ANSI_INTRODUCER.test(prompt.replace(SGR_RE, ""));
+  return isSgrOnly(prompt);
 }
 
 /**
