@@ -343,6 +343,7 @@ def test_fails_loudly_without_github_output(workdir: Path) -> None:
     assert result.returncode != 0
     assert "GITHUB_OUTPUT" in result.stderr
 
+
 def test_survives_self_overwrite_with_longer_file(workdir: Path) -> None:
     """The script lives under a synced path, so a sync overwrites its own file
     mid-run. When the replacement is LONGER than the running file, a bash that
