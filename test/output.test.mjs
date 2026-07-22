@@ -237,6 +237,21 @@ describe("sanitizeText: sgrNote is honest across Layers 2/4/5", () => {
     assert.equal(r.sgrNote, false);
   });
 
+  it("re-redact after a Layer-5 deletion normalizes a lone surrogate left at the join", async () => {
+    // 😀 is the surrogate pair HI+LO. Layer 5 deletes LO, leaving a lone HI
+    // between A and B — the exact hazard reRedactAfterSpanDeletion must fix by
+    // normalizing to U+FFFD (mirroring processLayer1) before the redactor sees
+    // the text, so a join-reconstituted secret can't slip a broken match.
+    const HI = "\uD83D";
+    const LO = "\uDE00";
+    const r = await sanitizeText(`A${HI}${LO}B`, {
+      redact: () => null,
+      filterInjection: () => ({ removeSpans: [LO] }),
+    });
+    assert.equal(r.cleaned, "A�B");
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(r.cleaned));
+  });
+
   it("keeps sgrNote true when a redactor RUNS but changes nothing (SGR strip is still the sole change)", async () => {
     const r = await sanitizeText(`${ESC}[31mfail${ESC}[0m`, {
       sgrCarveOut: true,

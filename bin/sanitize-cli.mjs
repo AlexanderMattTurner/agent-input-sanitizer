@@ -23,8 +23,9 @@
  * A failure response is `{ "error": string }`. Two modes, same binary:
  *
  *   one-shot (default): read ONE JSON object from stdin (may span lines), write
- *     ONE response line. A malformed request propagates — non-zero exit, stack
- *     on stderr — so a scripted caller fails loudly.
+ *     ONE response line. A malformed request propagates — non-zero exit, a
+ *     one-line reason on stderr (the message, deliberately not a raw Node stack)
+ *     — so a scripted caller fails loudly.
  *
  *   worker (`--worker`): read newline-delimited JSON requests until EOF, write
  *     EXACTLY one response line per input line, in order — including for a blank
@@ -135,6 +136,11 @@ const OPS = {
       req.globs.some((g) => typeof g !== "string")
     )
       throw new Error("request.globs must be an array of strings");
+    // Fail loud on a present-but-non-string cwd rather than silently dropping it
+    // and scanning process.cwd() — a wrong-scope scan is worse than a clear error
+    // (matches the fail-loud contract every other typed field here follows).
+    if ("cwd" in req && typeof req.cwd !== "string")
+      throw new Error("request.cwd must be a string");
     const { scanInstructionFiles } = await import("../src/instructions.mjs");
     const opts = typeof req.cwd === "string" ? { cwd: req.cwd } : {};
     return { findings: scanInstructionFiles(req.globs, opts) };

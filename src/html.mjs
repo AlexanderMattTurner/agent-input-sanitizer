@@ -209,11 +209,28 @@ function isHidingTransform(node) {
     const name = fn.name.toLowerCase();
     const args = valueTokens(fn);
     if (/^(?:scale|scale3d|scalex|scaley|matrix|matrix3d)$/.test(name)) {
-      // scale/matrix collapse to nothing when their first numeric factor is
-      // (near-)zero; css-tree reads the exponent form (`1e-3`) at full value.
-      // scale()/matrix() factors are <number>s (never lengths).
-      const first = args.find((/** @type {any} */ a) => a.type === "Number");
-      if (first && Math.abs(parseFloat(first.value)) < NEAR_ZERO_EPSILON)
+      // scale/matrix collapse to nothing when EITHER axis factor is (near-)zero —
+      // `scale(1,0)` / `scale3d(1,0,1)` collapse the Y axis, `matrix(1,0,0,0,…)`
+      // sets scaleY (d) to 0 — so testing only the first factor missed the
+      // multi-arg Y-collapse forms. css-tree reads the exponent form (`1e-3`) at
+      // full value; scale()/matrix() factors are <number>s (never lengths). For
+      // `matrix(a,b,c,d,…)` the two scale factors are a (index 0) and d (index 3).
+      // The two scale factors' positions differ per function: scale/scale3d/
+      // scaleX/scaleY carry them first (a single scaleX(0)/scaleY(0) sits at 0);
+      // `matrix(a,b,c,d,…)` puts scaleX=a (0) and scaleY=d (3); `matrix3d` puts
+      // scaleX=m11 (0) and scaleY=m22 (5). Do NOT use index 3 for matrix3d — that
+      // is m14, which is legitimately 0 on the identity matrix (false positive).
+      const numbers = args.filter(
+        (/** @type {any} */ a) => a.type === "Number",
+      );
+      const factorIdx =
+        name === "matrix" ? [0, 3] : name === "matrix3d" ? [0, 5] : [0, 1];
+      if (
+        factorIdx.some((/** @type {number} */ i) => {
+          const f = numbers[i];
+          return f && Math.abs(parseFloat(f.value)) < NEAR_ZERO_EPSILON;
+        })
+      )
         return true;
     } else if (name === "rotatex" || name === "rotatey") {
       // An axis rotation collapses the box to a line at an odd quarter-turn.
@@ -772,13 +789,14 @@ function textStrokeColor(val) {
   return "";
 }
 
-// Gradient-clipped / text-filled / outlined headings are VISIBLE despite
-// `color:transparent`: `background-clip:text` (or its `-webkit-` alias) paints
-// the background through the glyph shapes, `-webkit-text-fill-color` overrides
-// `color` for the fill, and `-webkit-text-stroke` paints a visible outline
-// around the (transparent-filled) glyphs. Any of these means the transparent
-// `color` is not the rendered text color, so the same-`transparent` hide must
-// fail open.
+// Gradient-clipped / outlined headings are VISIBLE despite an effectively
+// transparent fill: `background-clip:text` (or its `-webkit-` alias) paints the
+// background through the glyph shapes, and `-webkit-text-stroke` paints a visible
+// outline around the (transparent-filled) glyphs. Either means the transparent
+// paint is not the whole story, so the same-`transparent` hide must fail open.
+// A concrete `-webkit-text-fill-color` is NOT checked here: the caller resolves
+// the EFFECTIVE fill (fill override ?? color) before this runs, so a concrete
+// fill already keeps `effectiveColor` non-transparent and never reaches here.
 /** @param {(key: string) => string} val @returns {boolean} */
 function isTextPaintedVisible(val) {
   if (
@@ -786,10 +804,26 @@ function isTextPaintedVisible(val) {
     val("-webkit-background-clip") === "text"
   )
     return true;
-  const fill = canonicalizeColor(val("-webkit-text-fill-color"));
-  if (isConcreteColor(fill) && fill !== "transparent") return true;
   const stroke = textStrokeColor(val);
   return isConcreteColor(stroke) && stroke !== "transparent";
+}
+
+// True when the element paints a background IMAGE layer — a `background-image`
+// longhand set to anything but `none`, or a `background` shorthand carrying
+// `url(...)`, a gradient, or `image-set(...)`. A same-color text/background hide
+// CANNOT be proven when an image layer is present: the painted image can make
+// same-colored text readable, and if it fails to load the element's own
+// background shows through. Centralized so EVERY hide branch consults one
+// image-layer check — the `background` shorthand path already failed open via
+// {@link backgroundColor}, but the `background-color` longhand path inspected
+// only the flat color and missed a co-declared `background-image`, splicing
+// visible text. `background-clip:text` is NOT an image layer here — it paints
+// the background THROUGH the glyphs and is handled by {@link isTextPaintedVisible}.
+/** @param {(key: string) => string} textOf @returns {boolean} */
+function hasImageLayer(textOf) {
+  const img = textOf("background-image");
+  if (img && img !== "none") return true;
+  return /\burl\(|gradient\(|image-set\(/i.test(textOf("background"));
 }
 
 /**
@@ -966,21 +1000,36 @@ export function isHiddenStyle(styleStr) {
   // Same-color text on its background (white-on-white) and fully transparent
   // text are invisible to a human but plain text to the model. Colors are
   // canonicalized so `white`/`#fff`/`rgb(255,255,255)` mixes still compare.
+  // The color actually PAINTED onto the glyphs: `-webkit-text-fill-color`
+  // overrides `color` for the fill when it is concrete, so both hide branches
+  // must reason about this effective fill, not the raw `color` property — else a
+  // `color:#fff;-webkit-text-fill-color:#000` element (black text) is compared as
+  // white and spliced white-on-white.
   const color = canonicalizeColor(textOf("color"));
-  // `color:transparent` alone hides text — UNLESS the glyphs are painted by a
-  // background-clip:text gradient or a concrete -webkit-text-fill-color, the
-  // standard gradient-heading recipe, in which case the text is visible.
-  if (color === "transparent" && !isTextPaintedVisible(textOf)) return true;
+  const fillOverride = canonicalizeColor(textOf("-webkit-text-fill-color"));
+  const effectiveColor = isConcreteColor(fillOverride) ? fillOverride : color;
+  // `color:transparent` (or a transparent fill override) hides text — UNLESS the
+  // glyphs are painted by a background-clip:text gradient, a concrete
+  // -webkit-text-fill-color, or a text stroke, in which case the text is visible.
+  if (effectiveColor === "transparent" && !isTextPaintedVisible(textOf))
+    return true;
   const background =
     canonicalizeColor(textOf("background-color")) ||
     backgroundColor(textOf("background"));
   // Only flag same-color when BOTH sides resolve to a concrete color (`#rrggbb`
-  // or `transparent`). `var(--x)`, `inherit`, and `currentColor` canonicalize to
-  // their raw token, so two identical unresolved tokens (e.g. the ubiquitous
-  // `color:var(--fg);background:var(--fg)` or `color:inherit;background:inherit`,
-  // which resolve to DIFFERENT effective colors) would otherwise read as hidden
-  // and splice out visible text. Fail open on anything we can't resolve.
-  if (color && color === background && isConcreteColor(color)) return true;
+  // or `transparent`), AND no background IMAGE layer is present (an image can
+  // make same-colored text readable). `var(--x)`, `inherit`, and `currentColor`
+  // canonicalize to their raw token, so two identical unresolved tokens (e.g. the
+  // ubiquitous `color:var(--fg);background:var(--fg)`, which resolve to DIFFERENT
+  // effective colors) would otherwise read as hidden and splice out visible text.
+  // Fail open on anything we can't resolve.
+  if (
+    effectiveColor &&
+    effectiveColor === background &&
+    isConcreteColor(effectiveColor) &&
+    !hasImageLayer(textOf)
+  )
+    return true;
 
   return isOverflowHidden(nodeOf, textOf);
 }
@@ -1695,14 +1744,17 @@ const BLOB_VALUE_HEX_RE = /^[A-Fa-f0-9]{32,}$/;
 // RFC 4648 §5 url-safe base64 substitutes `-`/`_` for `+`/`/`, so a payload
 // encoded url-safe escapes the `[A-Za-z0-9+/]` arms above. Adding `-`/`_` to the
 // charset would re-admit a long hyphenated word-slug (`the-secret-history-of-…`)
-// as a "blob", so this arm additionally REQUIRES a contiguous 40+ char
-// alphanumeric run: bulk-encoded bytes carry one (the separators `-`/`_` are
-// rare in random base64url output), a human slug never does (every word breaks
-// the run at a hyphen well under 40). The contiguous-run length matches the
-// standard-base64 blob threshold, so the two arms agree on what counts as a
-// blob. Anchored to the whole value for the same RAW-query reason as above.
+// as a "blob", so this arm distinguishes the two by CHARACTER MIX rather than a
+// contiguous run: bulk-encoded bytes drawn from base64url's 64-symbol alphabet
+// almost always carry BOTH an uppercase letter and a digit, whereas a human slug
+// is lowercase dictionary words joined by separators and shows neither. The
+// earlier contiguous-40-run gate was fragile — ordinary base64url scatters a
+// `-`/`_` roughly every ~30 chars, breaking any 40-char run, so a real beacon
+// (`?d=<200-char base64url of cookies>`) routinely dodged it. The mix test keeps
+// the slug benign (no uppercase) while catching the scattered-separator blob the
+// run gate missed. Anchored to the whole value for the same RAW-query reason.
 const BLOB_VALUE_B64URL_RE = /^[A-Za-z0-9_-]{40,}={0,2}$/;
-const B64URL_RUN_RE = /[A-Za-z0-9]{40,}/;
+const B64URL_MIXED_RE = /(?=.*[A-Z])(?=.*[0-9])/;
 
 // A path segment whose whole value is a base64/hex run longer than any standard
 // content hash (SHA-512 hex is 128, base64 88; SHA-256 hex 64) is bulk encoded
@@ -1717,15 +1769,16 @@ const PATH_BLOB_RE = /^(?:[A-Za-z0-9+/]+={0,2}|[A-Fa-f0-9]+)$/;
 const PATH_BLOB_MIN_LEN = 128;
 
 /**
- * True for an entirely-url-safe-base64 value carrying a contiguous 40+
- * alphanumeric run — a url-safe-encoded blob, distinguished from a hyphenated
- * slug (which never sustains a 40-char unbroken run). Shared by the query and
- * path blob detectors.
+ * True for an entirely-url-safe-base64 value (≥40 chars) whose character mix —
+ * at least one uppercase letter AND one digit — marks it as bulk-encoded bytes
+ * rather than a lowercase hyphenated word-slug. Shared by the query and path
+ * blob detectors. Precision-first: a value missing either class is treated as a
+ * benign slug and passes (a false negative, per the detection-layer doctrine).
  * @param {string} value
  * @returns {boolean}
  */
 function isBase64UrlBlob(value) {
-  return BLOB_VALUE_B64URL_RE.test(value) && B64URL_RUN_RE.test(value);
+  return BLOB_VALUE_B64URL_RE.test(value) && B64URL_MIXED_RE.test(value);
 }
 
 /** @param {string} value @returns {boolean} */
@@ -1932,12 +1985,12 @@ export function checkExfilUrl(url) {
   if (parsed.username || parsed.password) return "embedded credentials";
   // A long query string is only suspicious when it carries a non-allowlisted
   // parameter — a signed-CDN URL is long by design (all `X-Amz-*`/SAS params).
-  const qIdx = url.indexOf("?");
-  if (
-    qIdx !== -1 &&
-    url.length - qIdx > LONG_QUERY_THRESHOLD &&
-    !allParamsBenign(parsed)
-  )
+  // Measure the query from `parsed.search` (the parser's query span), NOT a raw
+  // indexOf("?") into the whole URL: a `?` inside the FRAGMENT (`/p#a?<blob>`)
+  // would otherwise be read as the query start, leaving `parsed.search` empty so
+  // `allParamsBenign` runs `[].every(...)` → vacuously true and suppresses the
+  // flag. The fragment is length-checked separately just below.
+  if (parsed.search.length > LONG_QUERY_THRESHOLD && !allParamsBenign(parsed))
     return "unusually long query string";
   if (parsed.hash.length > LONG_QUERY_THRESHOLD)
     return "unusually long fragment";
@@ -1997,8 +2050,14 @@ function isOffOrigin(url) {
  * @returns {string | null}
  */
 function metaRefreshUrl(content) {
+  // Do NOT exclude `;` from the URL run: the `;` separates the timeout from
+  // `url=` BEFORE the target, while WITHIN the target it is a legal query
+  // sub-delimiter — excluding it truncated a `?a=1;b=<blob>` exfil tail. The
+  // optional leading quote is consumed and the run then stops at the closing
+  // quote (quoted) or at whitespace (unquoted); a single group keeps both forms
+  // without an unreachable no-match arm.
   const match = /** @type {{ groups: { url: string } } | null} */ (
-    content.match(/url\s*=\s*['"]?(?<url>[^'"\s;]+)/i)
+    content.match(/url\s*=\s*['"]?(?<url>[^'"\s]+)/i)
   );
   return match ? match.groups.url : null;
 }

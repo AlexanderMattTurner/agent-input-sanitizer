@@ -1,10 +1,16 @@
 /**
- * Layer 1: ANSI + invisible-character stripping with lone-surrogate
- * normalization. The zero-dependency core shared by the convenience `sanitize`
- * (index.mjs), the tool-output pipeline (output.mjs), and the Edit-repair
- * rehydrator (rehydrate.mjs) — a single implementation so every consumer
- * derives the EXACT view the model was shown (a re-implementation would drift,
- * and rehydration's soundness gate depends on re-cleaning reproducing the view).
+ * Layer 1: ANSI + invisible-character stripping. The zero-dependency core shared
+ * by the convenience `sanitize` (index.mjs), the tool-output pipeline
+ * (output.mjs), and the Edit-repair rehydrator (rehydrate.mjs) — a single
+ * implementation so every consumer derives the EXACT view the model was shown (a
+ * re-implementation would drift, and rehydration's soundness gate depends on
+ * re-cleaning reproducing the view).
+ *
+ * Lone-surrogate normalization is NOT applied by {@link applyLayer1} itself: it
+ * is exported as {@link LONE_SURROGATE_RE} for consumers to apply at the boundary
+ * that needs a well-formed string (the redactor input in output.mjs's
+ * processLayer1 / re-redact, and before the HTML tokenizer), because that is the
+ * point where a lone surrogate would otherwise corrupt a match or a parse.
  */
 import { stripInvisibleWithReport, CATEGORY } from "./invisible.mjs";
 
