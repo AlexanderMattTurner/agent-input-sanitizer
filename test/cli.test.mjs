@@ -380,6 +380,25 @@ describe("CLI: op dispatch mirrors the in-process entry point", () => {
     assert.equal(clean(path.join(dir, "CLEAN.md")), false);
     assert.deepEqual(scanInstructionFiles(["*.md"], { cwd: dir }), []);
   });
+
+  it("scanInstructionFiles rejects a present-but-non-string cwd loudly", () => {
+    assert.throws(
+      () =>
+        run(
+          [],
+          JSON.stringify({
+            op: "scanInstructionFiles",
+            globs: ["*.md"],
+            cwd: 5,
+          }),
+        ),
+      (err) => {
+        assert.equal(err.status, 1);
+        assert.match(String(err.stderr), /request\.cwd must be a string/);
+        return true;
+      },
+    );
+  });
 });
 
 describe("CLI: unknown op fails loudly", () => {

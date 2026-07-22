@@ -406,7 +406,20 @@ export function atomicReplaceFile(
     throw err;
   }
   closeSync(fd);
-  renameSync(tmp, absPath);
+  // A failing rename (EACCES/EXDEV/EDQUOT/…) past the write/sync try leaves our
+  // temp on disk; clean it up before rethrowing so repeated failures don't
+  // accrete stray .<hex>.tmp files. (A later dir-fsync throw needs no cleanup —
+  // the rename already consumed the temp into absPath.)
+  try {
+    renameSync(tmp, absPath);
+  } catch (err) {
+    try {
+      remove(tmp);
+    } catch {
+      // Best-effort: rethrow the ORIGINAL rename failure, not a secondary unlink.
+    }
+    throw err;
+  }
   // fsync the DIRECTORY so the rename (a directory metadata change) is durable
   // across a crash, not just the file's data blocks.
   const dirFd = openSync(dir, constants.O_RDONLY);
@@ -461,7 +474,7 @@ export function atomicReplaceFile(
  *   {@link atomicReplaceFile}'s `tmpName`): lets a test drive the concurrent
  *   write/symlink-swap that the TOCTOU guard exists to catch, which is otherwise
  *   unreachable from this fully-synchronous path. Defaults to `lstatSync`.
- * @returns {boolean}
+ * @returns {boolean|null}
  */
 export function cleanFile(absPath, lstat = lstatSync) {
   let fd;
@@ -505,6 +518,14 @@ export function cleanFile(absPath, lstat = lstatSync) {
     if (scanText(original).length === 0) return false;
 
     const stripped = stripInvisible(original);
+    // scanText flagged a payload but the stripper removed nothing — the flagged
+    // run was PRESERVED (e.g. a well-formed emoji-tag sequence the stripper
+    // keeps). Signal that with null (not true) and write nothing: reporting
+    // {changed:true} here would tell the caller a preserved payload was cleaned
+    // (a fail-open). Currently unreachable — every scan-flagging run contains a
+    // strippable char — but load-bearing the moment a fully-preservable class is
+    // added to the strip set.
+    if (stripped === original) return null;
     // Re-verify the on-path file against the open-time snapshot before writing:
     // an inode/size/mtime change (or a swap to a symlink) means someone modified
     // it under us, so fail loud rather than clobber their write (lost update).
