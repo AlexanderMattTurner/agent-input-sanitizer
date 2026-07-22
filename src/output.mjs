@@ -119,6 +119,21 @@ function errMessage(err) {
  */
 
 /**
+ * Map every lone UTF-16 surrogate to U+FFFD. Load-bearing on ANY path that feeds
+ * text to the injected redactor: a secret split by an interposed lone surrogate
+ * reads as adjacent to a model rendering its own UTF-16 but as broken to a
+ * redactor (Node maps the lone surrogate to U+FFFD en route), so a secret
+ * reconstituted across the surrogate survives redaction unless the text is
+ * normalized first. Shared by {@link processLayer1} and the Layer-5 re-redact so
+ * the two redact-input paths cannot drift.
+ * @param {string} text
+ * @returns {string}
+ */
+function normalizeLoneSurrogates(text) {
+  return text.replace(LONE_SURROGATE_RE, "�");
+}
+
+/**
  * Re-run Layer 4 (`redact`) on `text` and fold a finding into `warnings`,
  * mirroring the first Layer-4 call's fail-closed behavior. Used after Layer 5
  * deletes a span, since joining the bytes on either side of a deleted span can
@@ -130,8 +145,15 @@ function errMessage(err) {
  */
 async function reRedactAfterSpanDeletion(text, redact, warnings) {
   try {
-    const secrets = await redact(text);
-    if (!secrets) return text;
+    // Layer-5 span deletion can splice two kept regions together across a lone
+    // UTF-16 surrogate, both reconstituting a secret the first pass never saw
+    // intact AND leaving a lone surrogate the redactor would read as U+FFFD
+    // (breaking the match). Normalize first — the SAME normalization processLayer1
+    // applies — so the re-redact sees the well-formed text the model's next view
+    // will, and a join-reconstituted secret can't slip through.
+    const normalized = normalizeLoneSurrogates(text);
+    const secrets = await redact(normalized);
+    if (!secrets) return normalized;
     warnings.push(
       `API keys/secrets redacted: ${secrets.found.join(", ")}${secrets.note ?? ""}`,
     );
@@ -235,7 +257,7 @@ function processLayer1(text, sgrCarveOut) {
   // UTF-16 but as broken to a redactor (Node maps the lone surrogate to U+FFFD
   // on the way there), so normalizing here keeps both views identical. It also
   // keeps an HTML tokenizer from throwing on a stray byte below.
-  const wellFormed = cleaned.replace(LONE_SURROGATE_RE, "\uFFFD");
+  const wellFormed = normalizeLoneSurrogates(cleaned);
   if (wellFormed !== cleaned) {
     cleaned = wellFormed;
     modified = true;
