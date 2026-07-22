@@ -8,6 +8,18 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.10] - 2026-07-22
+
+### Changed
+
+- style: satisfy ruff-format blank-line rule in test_template_sync
+- fix(coverage): restore 100% — drop dead fill check, revert unreachable branches
+- fix(html): measure query from parsed.search; keep meta-refresh ;-query tail
+- fix(instructions): cleanFile null signal, temp cleanup on rename fail, CLI cwd
+- refactor(prompt): drop dead SGR-only conjunct and correct its false comment
+- fix(output): normalize lone surrogates on the Layer-5 re-redact path
+- fix(html): kill same-color false positives, multi-arg scale collapse, base64url beacon
+
 ## [1.47.9] - 2026-07-21
 
 ### Changed
