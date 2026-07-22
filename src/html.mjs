@@ -789,13 +789,14 @@ function textStrokeColor(val) {
   return "";
 }
 
-// Gradient-clipped / text-filled / outlined headings are VISIBLE despite
-// `color:transparent`: `background-clip:text` (or its `-webkit-` alias) paints
-// the background through the glyph shapes, `-webkit-text-fill-color` overrides
-// `color` for the fill, and `-webkit-text-stroke` paints a visible outline
-// around the (transparent-filled) glyphs. Any of these means the transparent
-// `color` is not the rendered text color, so the same-`transparent` hide must
-// fail open.
+// Gradient-clipped / outlined headings are VISIBLE despite an effectively
+// transparent fill: `background-clip:text` (or its `-webkit-` alias) paints the
+// background through the glyph shapes, and `-webkit-text-stroke` paints a visible
+// outline around the (transparent-filled) glyphs. Either means the transparent
+// paint is not the whole story, so the same-`transparent` hide must fail open.
+// A concrete `-webkit-text-fill-color` is NOT checked here: the caller resolves
+// the EFFECTIVE fill (fill override ?? color) before this runs, so a concrete
+// fill already keeps `effectiveColor` non-transparent and never reaches here.
 /** @param {(key: string) => string} val @returns {boolean} */
 function isTextPaintedVisible(val) {
   if (
@@ -803,8 +804,6 @@ function isTextPaintedVisible(val) {
     val("-webkit-background-clip") === "text"
   )
     return true;
-  const fill = canonicalizeColor(val("-webkit-text-fill-color"));
-  if (isConcreteColor(fill) && fill !== "transparent") return true;
   const stroke = textStrokeColor(val);
   return isConcreteColor(stroke) && stroke !== "transparent";
 }
@@ -2051,19 +2050,16 @@ function isOffOrigin(url) {
  * @returns {string | null}
  */
 function metaRefreshUrl(content) {
-  // The `;` separates the timeout from `url=` BEFORE the target; within the URL a
-  // `;` is a legal query sub-delimiter, so the target must NOT be truncated at it
-  // (that dropped a `?a=1;b=<blob>` exfil tail). A quoted value runs to its
-  // closing quote; an unquoted value stops only at whitespace or a quote.
-  const match =
-    /** @type {{ groups: Record<string, string|undefined> } | null} */ (
-      content.match(
-        /url\s*=\s*(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'|(?<uq>[^'"\s]+))/i,
-      )
-    );
-  if (!match) return null;
-  const { dq, sq, uq } = match.groups;
-  return dq ?? sq ?? uq ?? null;
+  // Do NOT exclude `;` from the URL run: the `;` separates the timeout from
+  // `url=` BEFORE the target, while WITHIN the target it is a legal query
+  // sub-delimiter — excluding it truncated a `?a=1;b=<blob>` exfil tail. The
+  // optional leading quote is consumed and the run then stops at the closing
+  // quote (quoted) or at whitespace (unquoted); a single group keeps both forms
+  // without an unreachable no-match arm.
+  const match = /** @type {{ groups: { url: string } } | null} */ (
+    content.match(/url\s*=\s*['"]?(?<url>[^'"\s]+)/i)
+  );
+  return match ? match.groups.url : null;
 }
 
 // HTML whitespace per the `srcset` grammar (ASCII whitespace).
