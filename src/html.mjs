@@ -1986,12 +1986,12 @@ export function checkExfilUrl(url) {
   if (parsed.username || parsed.password) return "embedded credentials";
   // A long query string is only suspicious when it carries a non-allowlisted
   // parameter — a signed-CDN URL is long by design (all `X-Amz-*`/SAS params).
-  const qIdx = url.indexOf("?");
-  if (
-    qIdx !== -1 &&
-    url.length - qIdx > LONG_QUERY_THRESHOLD &&
-    !allParamsBenign(parsed)
-  )
+  // Measure the query from `parsed.search` (the parser's query span), NOT a raw
+  // indexOf("?") into the whole URL: a `?` inside the FRAGMENT (`/p#a?<blob>`)
+  // would otherwise be read as the query start, leaving `parsed.search` empty so
+  // `allParamsBenign` runs `[].every(...)` → vacuously true and suppresses the
+  // flag. The fragment is length-checked separately just below.
+  if (parsed.search.length > LONG_QUERY_THRESHOLD && !allParamsBenign(parsed))
     return "unusually long query string";
   if (parsed.hash.length > LONG_QUERY_THRESHOLD)
     return "unusually long fragment";
@@ -2051,10 +2051,19 @@ function isOffOrigin(url) {
  * @returns {string | null}
  */
 function metaRefreshUrl(content) {
-  const match = /** @type {{ groups: { url: string } } | null} */ (
-    content.match(/url\s*=\s*['"]?(?<url>[^'"\s;]+)/i)
-  );
-  return match ? match.groups.url : null;
+  // The `;` separates the timeout from `url=` BEFORE the target; within the URL a
+  // `;` is a legal query sub-delimiter, so the target must NOT be truncated at it
+  // (that dropped a `?a=1;b=<blob>` exfil tail). A quoted value runs to its
+  // closing quote; an unquoted value stops only at whitespace or a quote.
+  const match =
+    /** @type {{ groups: Record<string, string|undefined> } | null} */ (
+      content.match(
+        /url\s*=\s*(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'|(?<uq>[^'"\s]+))/i,
+      )
+    );
+  if (!match) return null;
+  const { dq, sq, uq } = match.groups;
+  return dq ?? sq ?? uq ?? null;
 }
 
 // HTML whitespace per the `srcset` grammar (ASCII whitespace).

