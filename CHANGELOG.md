@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.11] - 2026-07-23
+
+### Changed
+
+- test(python): make the suite run on the 3.10 floor in CI
+- fix(python): lower requires-python to 3.10 by removing 3.11-only regex
+
 ## [1.47.10] - 2026-07-22
 
 ### Changed
