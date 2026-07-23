@@ -8,7 +8,11 @@ behaves (rejects the nested lookalike, still accepts the real fixture path).
 """
 
 import re
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 (the package floor) has no tomllib
+    import tomli as tomllib
 
 from tests._helpers import REPO_ROOT
 

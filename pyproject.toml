@@ -10,7 +10,15 @@ requires-python = ">=3.10"
 [project.optional-dependencies]
 # regexploit statically flags super-linear (ReDoS) regexes; the secrets ReDoS
 # guard (tests/secrets/test_redos_static_guard.py) shells out to it.
-dev = ["pytest>=7", "detect-secrets>=1.5.0", "hypothesis>=6", "regexploit>=1.0.0"]
+# tomli backfills the stdlib `tomllib` (3.11+) on the 3.10 floor for the test
+# suite; marker-gated so 3.11+ uses the stdlib and never installs it.
+dev = [
+    "pytest>=7",
+    "detect-secrets>=1.5.0",
+    "hypothesis>=6",
+    "regexploit>=1.0.0",
+    "tomli>=2 ; python_version < '3.11'",
+]
 
 [tool.ruff]
 target-version = "py310"
