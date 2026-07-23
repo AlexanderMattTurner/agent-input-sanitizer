@@ -402,6 +402,47 @@ if [[ -f CHANGELOG.md ]] && [[ -n "$CHANGELOG_SECTION" ]]; then
     node "$SCRIPT_DIR/promote-changelog.mjs"
 fi
 
+# Push HEAD to $branch on origin, tolerating a concurrent advance of the branch.
+# The auto-version concurrency group serializes THIS workflow, but $branch can
+# still move mid-run via an ordinary PR merge from another actor — so the run
+# checked out a now-stale tip and a plain `git push` is rejected non-fast-forward.
+# Retrying the identical push (what retry_cmd does) can never win: the remote
+# never rewinds. Instead, on rejection, fetch the new tip and REBASE our commits
+# onto it, then retry. The release-docs commit only touches CHANGELOG.md and
+# concurrent merges never hand-edit the `## Unreleased` block, so the replay
+# applies cleanly; a genuine conflict aborts loudly rather than force-pushing
+# over the other commit. A transient network failure degrades to the same
+# fetch-then-retry path (the fetch also fails, we back off and retry the push).
+# $1: branch, $2: max attempts, $3: initial backoff seconds (doubles each retry).
+push_with_rebase() {
+  local branch="$1" max="$2" delay="$3" attempt=1
+  while [[ "$attempt" -le "$max" ]]; do
+    git push origin "HEAD:$branch" && return 0
+    if [[ "$attempt" -ge "$max" ]]; then
+      break
+    fi
+    printf 'push to %s rejected (attempt %d/%d); rebasing onto the updated tip, retrying in %ds...\n' \
+      "$branch" "$attempt" "$max" "$delay" >&2
+    if ! git fetch origin "$branch"; then
+      log "Warning: 'git fetch origin $branch' failed; will back off and retry the push."
+    # --autostash: package.json is left intentionally dirty (npm owns the version;
+    # it is never committed), which a plain rebase refuses. autostash shelves that
+    # working-tree edit before the replay and restores it after — the concurrent
+    # commit never touches package.json, so the restore can't conflict.
+    elif ! git rebase --autostash "origin/$branch"; then
+      if ! git rebase --abort >/dev/null 2>&1; then
+        log "Warning: 'git rebase --abort' failed during conflict cleanup; the working tree may need inspection."
+      fi
+      log "Error: release-docs commit conflicts with a concurrent change to $branch; refusing to force-push."
+      return 1
+    fi
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 # Commit the CHANGELOG entry back to the default branch so users see the release
 # notes. package.json stays dirty (npm is the source of truth for version). A
 # bot identity and `[skip ci]` keep the resulting push from spawning another
@@ -417,8 +458,9 @@ else
   git add -- CHANGELOG.md
   git commit -m "docs: release $NEW_VERSION [skip ci]"
   # Push to the default branch explicitly so this works whether actions/checkout
-  # left us on a branch or in detached HEAD state.
-  if ! retry_cmd 4 2 git push origin "HEAD:$DEFAULT_BRANCH"; then
+  # left us on a branch or in detached HEAD state. Rebase-on-reject so a racing
+  # merge to the branch mid-run can't strand the release (npm already published).
+  if ! push_with_rebase "$DEFAULT_BRANCH" 4 2; then
     log "⚠️ Failed to push release-docs update. Release was published; docs can be updated manually."
     RELEASE_DOCS_PUSH_FAILED=1
   fi
