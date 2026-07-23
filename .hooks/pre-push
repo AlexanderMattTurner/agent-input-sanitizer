@@ -1,50 +1,73 @@
 #!/bin/bash
-# Pre-push hook: run the full pre-commit suite over all files and auto-fix.
+# Pre-push hook: run the pre-commit suite over the commits being pushed, plus
+# the portable-symlink check, so they abort the push instead of surfacing as a
+# red check on the PR.
 #
-# CI's pre-commit.yaml runs `pre-commit run --all-files`; its fixers
-# (trailing-whitespace, end-of-file, prettier, ruff) mutate files, so a fixable
-# defect that slipped past the staged-only pre-commit hook still turns CI red.
-# This runs the same suite before every push: when a fixer changes a file it
-# commits the fix and stops the push so the next push carries it. A
-# non-autofixable failure blocks the push outright. Skips gracefully when
-# pre-commit is not installed (CI stays the backstop).
+# The per-commit hook formats staged files; this catches everything the push
+# would introduce (e.g. an edit committed with --no-verify, or files brought in
+# by a merge) before it can reach the remote. The check is scoped to the pushed
+# range — `pre-commit run --from-ref <remote> --to-ref <local>` — so a push
+# costs seconds, not a minutes-long whole-tree sweep. pre-commit.yaml re-runs
+# the full suite on the PR in CI, so it catches web-editor edits that bypass
+# this hook. A failure aborts the push: commit the fixes pre-commit applied (or
+# fix the real lint error it reports) and push again.
 
 set -euo pipefail
 
 git_root=$(git rev-parse --show-toplevel)
-cd "$git_root" || exit 1
 
-if [ -d "$git_root/.venv/bin" ]; then
+# Git hooks run in a bare shell and don't inherit session PATH edits; surface
+# the venv's tools plus uv/uvx and cargo installs.
+if [[ -d "$git_root/.venv/bin" ]]; then
   export PATH="$git_root/.venv/bin:$PATH"
 fi
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
-if ! command -v pre-commit >/dev/null 2>&1; then
-  exit 0
+# Mirror CI's invocation: pre-commit.yaml runs `uvx pre-commit==<pin>`, and that
+# workflow line is the one authoritative pin — read it from there so this hook
+# can't drift to a different version. Fall back to a PATH pre-commit when uvx is
+# absent; when neither exists, skip loudly (CI still runs the full suite on the
+# PR) rather than blocking the push on a tool the machine doesn't have.
+precommit_cmd=()
+if command -v uvx >/dev/null 2>&1; then
+  pin=$(sed -n 's/.*uvx \(pre-commit==[0-9][0-9.]*\).*/\1/p' \
+    "$git_root/.github/workflows/pre-commit.yaml" | head -n1)
+  precommit_cmd=(uvx "${pin:-pre-commit}")
+elif command -v pre-commit >/dev/null 2>&1; then
+  precommit_cmd=(pre-commit)
+else
+  echo "pre-push: neither uvx nor pre-commit found on PATH — SKIPPING the pushed-range pre-commit run." >&2
+  echo "pre-push: install uv (https://docs.astral.sh/uv/) or 'pip install pre-commit'; CI still enforces the suite." >&2
 fi
 
-# Snapshot the worktree BEFORE running fixers. If it was already dirty, we
-# cannot tell fixer output apart from the user's in-progress edits, so we must
-# not fold anything into an auto `style:` commit (that would sweep unrelated WIP
-# — and possibly secrets — into history under a misleading message).
-pre_state=$(git status --porcelain)
+# origin's default branch — the base the new-branch fallback diffs against.
+default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
 
-if pre-commit run --all-files; then
-  exit 0
+# git feeds one line per ref being pushed: <local ref> <local sha> <remote ref>
+# <remote sha>. Check each pushed range. A remote sha of all zeros is a new
+# branch with no upstream to diff against — fall back to the merge base with the
+# default branch, and to the empty tree on a repo with no origin/HEAD (first
+# push), so the whole history is checked exactly once.
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [[ "$local_sha" == "$zero" ]] && continue # branch deletion: nothing to check
+  [[ ${#precommit_cmd[@]} -eq 0 ]] && continue
+  from_ref="$remote_sha"
+  if [[ "$from_ref" == "$zero" ]]; then
+    from_ref=$(git merge-base "$default_branch" "$local_sha" 2>/dev/null) ||
+      from_ref=$(git hash-object -t tree /dev/null)
+  fi
+  [[ "$from_ref" == "$local_sha" ]] && continue # nothing new to push
+  # Redirect stdin from /dev/null: git feeds this loop the ref list on stdin,
+  # and pre-commit (and the tools it drives) would otherwise inherit and consume
+  # it, so a multi-ref push would check only the first range.
+  "${precommit_cmd[@]}" run --from-ref "$from_ref" --to-ref "$local_sha" --show-diff-on-failure </dev/null
+done
+
+# Portable-symlink check: rejects a tracked symlink with an absolute target
+# before it can reach the remote. Runs the SAME script CI does (no
+# reimplementation, so they can't drift); git-only, milliseconds.
+symlinks="$git_root/.github/scripts/check-symlinks.sh"
+if [[ -f "$symlinks" ]]; then
+  bash "$symlinks"
 fi
-
-if git diff --quiet; then
-  echo "pre-push: pre-commit reported non-autofixable issues — fix them above." >&2
-  exit 1
-fi
-
-if [[ -n "$pre_state" ]]; then
-  echo "pre-push: pre-commit auto-fixed files, but the worktree was already dirty before this run." >&2
-  echo "pre-push: refusing to fold pre-existing changes into a 'style:' commit — review, stage, and commit them yourself, then re-run 'git push'." >&2
-  exit 1
-fi
-
-# Worktree was clean pre-run, so every change now present is fixer output.
-git diff --name-only -z | xargs -0 git add --
-git commit --no-verify -m "style: auto-fix pre-commit issues"
-echo "pre-push: auto-fixed and committed pre-commit issues — re-run 'git push'." >&2
-exit 1

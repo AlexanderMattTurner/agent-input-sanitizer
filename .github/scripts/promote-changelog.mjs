@@ -49,7 +49,7 @@ function atomicWrite(path, contents) {
  */
 function readEnv() {
   const required = ["NEW_VERSION", "RELEASE_DATE", "CHANGELOG_SECTION"];
-  const values = {};
+  const values = Object.create(null);
   for (const name of required) {
     const value = process.env[name];
     if (!value) {

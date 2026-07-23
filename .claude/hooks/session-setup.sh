@@ -56,10 +56,31 @@ go_install_pinned() {
 apt_updated=0
 apt_install_if_missing() {
   local cmd="$1" pkg="${2:-$1}"
+<<<<<<< local
   command -v "$cmd" &>/dev/null && return 0
   if ! is_root || ! command -v apt-get &>/dev/null; then
     warn "$cmd not found and cannot be auto-installed (needs root + apt); install it manually"
     return 0
+=======
+  if ! command -v "$cmd" &>/dev/null; then
+    local installer
+    installer=$(mktemp "${TMPDIR:-/tmp}/webi-${cmd}-XXXXXX.sh")
+    # webi.sh serves a per-tool bootstrap generated on the fly, so there is no
+    # stable digest to pin; we harden with HTTPS-only (--proto =https), the
+    # shebang check below, and a version-pinned $pkg instead.
+    # pin-exempt: webi.sh bootstrap is generated per-request, no stable digest
+    if curl --proto '=https' -fsSL "https://webi.sh/$pkg" -o "$installer" 2>/dev/null; then
+      first_line="$(head -n 1 "$installer")"
+      if grep -q '^#!' <<<"$first_line"; then
+        sh "$installer" >/dev/null 2>&1 || warn "Failed to install $cmd"
+      else
+        warn "Installer for $cmd is not a shell script (missing shebang) — skipping"
+      fi
+    else
+      warn "Failed to download installer for $cmd"
+    fi
+    rm -f "$installer"
+>>>>>>> template
   fi
   if [ "$apt_updated" -eq 0 ]; then
     apt-get update -qq || warn "apt-get update failed"
@@ -180,8 +201,13 @@ fi
 
 if [ -z "${GH_REPO:-}" ]; then
   remote_url=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null)
-  if [[ "$remote_url" =~ /git/([^/]+/[^/]+)$ ]]; then
-    GH_REPO="${BASH_REMATCH[1]}"
+  # Anchor to the real local-proxy host authority — the same predicate the
+  # web-session permission grant below uses. A bare /git/owner/repo suffix on a
+  # hostile origin (e.g. https://attacker.example/git/evil/repo) must not be
+  # allowed to redirect every subsequent gh command at an attacker's repo.
+  # BASH_REMATCH[1] is the optional port group; owner/repo is [2].
+  if [[ "$remote_url" =~ ^https?://[^/@]*@127\.0\.0\.1(:[0-9]+)?/git/([^/]+/[^/]+)$ ]]; then
+    GH_REPO="${BASH_REMATCH[2]}"
     GH_REPO="${GH_REPO%.git}"
     export GH_REPO
     if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
@@ -197,7 +223,7 @@ fi
 # In web sessions (detected by proxy remote URL), grant Claude Code
 # permission to modify its own .claude/ folder without prompting.
 remote_url="${remote_url:-$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null)}"
-if [[ "$remote_url" =~ 127\.0\.0\.1.*/git/ ]]; then
+if [[ "$remote_url" =~ ^https?://[^/@]*@127\.0\.0\.1(:[0-9]+)?/git/ ]]; then
   local_settings="$PROJECT_DIR/.claude/settings.local.json"
   if [ ! -f "$local_settings" ]; then
     # Grant self-edit only over non-executable Claude assets (skills), and

@@ -47,6 +47,7 @@ jobs:
           # GITLEAKS_VERSION and stay in lockstep with gitleaks.yaml's pin.
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
+<<<<<<< local
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           # Download to a file (not a pipe) so the digest is verified before extract.
           curl --proto '=https' -sSfL \
@@ -59,6 +60,13 @@ jobs:
           esac
           echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
           tar xz -C /usr/local/bin -f "$tarball" gitleaks
+=======
+          set -euo pipefail
+          curl --proto '=https' -fsSL --retry 6 --retry-all-errors --retry-delay 15 --connect-timeout 30 \
+            -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar xz -C /usr/local/bin -f /tmp/gitleaks.tar.gz gitleaks
+>>>>>>> template
           gitleaks detect --no-git -s /tmp/phone-home -v
 
       - name: Submit to template repo
