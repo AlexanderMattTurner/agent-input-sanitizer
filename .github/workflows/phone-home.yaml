@@ -47,10 +47,12 @@ jobs:
           # GITLEAKS_VERSION and stay in lockstep with gitleaks.yaml's pin.
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
-          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          set -euo pipefail
+          tarball="/tmp/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           # Download to a file (not a pipe) so the digest is verified before extract.
-          curl --proto '=https' -sSfL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" \
+          # Retry/timeout flags harden against transient release-CDN failures.
+          curl --proto '=https' -fsSL --retry 6 --retry-all-errors --retry-delay 15 --connect-timeout 30 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             -o "$tarball"
           case "$GITLEAKS_SHA256" in
             PLACEHOLDER_*)

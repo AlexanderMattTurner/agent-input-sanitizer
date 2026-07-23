@@ -180,8 +180,13 @@ fi
 
 if [ -z "${GH_REPO:-}" ]; then
   remote_url=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null)
-  if [[ "$remote_url" =~ /git/([^/]+/[^/]+)$ ]]; then
-    GH_REPO="${BASH_REMATCH[1]}"
+  # Anchor to the real local-proxy host authority — the same predicate the
+  # web-session permission grant below uses. A bare /git/owner/repo suffix on a
+  # hostile origin (e.g. https://attacker.example/git/evil/repo) must not be
+  # allowed to redirect every subsequent gh command at an attacker's repo.
+  # BASH_REMATCH[1] is the optional port group; owner/repo is [2].
+  if [[ "$remote_url" =~ ^https?://[^/@]*@127\.0\.0\.1(:[0-9]+)?/git/([^/]+/[^/]+)$ ]]; then
+    GH_REPO="${BASH_REMATCH[2]}"
     GH_REPO="${GH_REPO%.git}"
     export GH_REPO
     if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
@@ -197,7 +202,7 @@ fi
 # In web sessions (detected by proxy remote URL), grant Claude Code
 # permission to modify its own .claude/ folder without prompting.
 remote_url="${remote_url:-$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null)}"
-if [[ "$remote_url" =~ 127\.0\.0\.1.*/git/ ]]; then
+if [[ "$remote_url" =~ ^https?://[^/@]*@127\.0\.0\.1(:[0-9]+)?/git/ ]]; then
   local_settings="$PROJECT_DIR/.claude/settings.local.json"
   if [ ! -f "$local_settings" ]; then
     # Grant self-edit only over non-executable Claude assets (skills), and

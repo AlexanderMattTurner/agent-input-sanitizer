@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.13] - 2026-07-23
+
+### Changed
+
+- chore: resolve template-sync merge conflicts
+- chore: sync from template repository (f2b22de)
+
 ## [1.47.11] - 2026-07-23
 
 ### Changed

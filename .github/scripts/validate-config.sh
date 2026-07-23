@@ -58,9 +58,9 @@ for f in .hooks/* .claude/hooks/*; do
       error "$f has a python syntax error: $py_err"
     fi
     ;;
-  *.mjs | *.js)
-    if ! js_err=$(node --check "$f" 2>&1); then
-      error "$f has a JavaScript syntax error: $js_err"
+  *.mjs | *.cjs | *.js)
+    if ! node_err=$(node --check "$f" 2>&1); then
+      error "$f has a JavaScript syntax error: $node_err"
     fi
     ;;
   *.json)
@@ -94,6 +94,25 @@ if [[ -f .claude/settings.json ]]; then
     *) error "PreToolUse hook is not invoked through safe-launch.sh (risks session lockout on parse error): $cmd" ;;
     esac
   done <<<"$pretooluse_cmds"
+fi
+
+# 4. Hook matchers must not embed permission-rule/command syntax (e.g.
+# "Bash(git push*)"). `matcher` filters only on tool name; a value shaped
+# like a tool call is silently never matched (RegExp.test on the literal
+# tool name), which quietly disables the whole hook. That belongs in the
+# handler's own `if` field instead.
+echo "Checking hook matchers don't embed command-content syntax..."
+if [[ -f .claude/settings.json ]]; then
+  if ! matchers=$(jq -r '.hooks // {} | .[] | .[] | .matcher? // empty' .claude/settings.json 2>/dev/null); then
+    error ".claude/settings.json could not be parsed (invalid JSON?)"
+    matchers=""
+  fi
+  while IFS= read -r matcher; do
+    [[ -z "$matcher" ]] && continue
+    if [[ "$matcher" =~ ^[A-Za-z_-]+\( ]]; then
+      error "Hook matcher looks like command-content syntax, not a tool-name filter (use the handler's \"if\" field instead): $matcher"
+    fi
+  done <<<"$matchers"
 fi
 
 # Summary

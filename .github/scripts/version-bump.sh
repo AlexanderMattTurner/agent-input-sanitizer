@@ -204,12 +204,22 @@ fi
 # `head -c` cap is byte-based and can split a multibyte UTF-8 character at the
 # tail; if it does, the only consequence is that `jq -n --arg` rejects the
 # invalid sequence and the Claude prose step falls back to the plain commit list
-# (the version decision never uses $COMMITS), so a corrupted tail degrades
-# gracefully rather than failing the release.
+# (the version decision never uses $COMMITS), so a corrupted tail costs only
+# the generated prose — the release itself still completes.
 COMMITS=$(echo "$COMMITS_RAW" | head -20 | cut -c1-100 | head -c 2000)
 
 if [[ -z "$COMMITS" ]]; then
   log "No commits to analyze. Skipping."
+  exit 0
+fi
+
+# Skip when every commit since the tag is this script's own release-docs commit
+# ("docs: release X.Y.Z [skip ci]"). The tag is pushed BEFORE the docs commit
+# (tag = published SHA), so after a successful release HEAD sits one docs commit
+# past the tag; without this guard a manual re-dispatch with no real work would
+# read that docs commit as releasable and cut a spurious patch.
+if ! grep -Evq '^docs: release [0-9]+\.[0-9]+\.[0-9]+ \[skip ci\]$' <<<"$COMMIT_SUBJECTS"; then
+  log "Only release-docs commits since $LAST_TAG. Skipping."
   exit 0
 fi
 
@@ -393,7 +403,7 @@ emit_output "version=$NEW_VERSION"
 
 # Promote "## Unreleased" to a dated version section in CHANGELOG.md, using the
 # drafted body. The helper exits 0 even on its own errors: the package is
-# already published, so a CHANGELOG hiccup must not abort the tag push below.
+# already published and tagged, so a CHANGELOG hiccup must not mask that.
 if [[ -f CHANGELOG.md ]] && [[ -n "$CHANGELOG_SECTION" ]]; then
   RELEASE_DATE=$(date -u +%Y-%m-%d)
   NEW_VERSION="$NEW_VERSION" \
@@ -446,10 +456,15 @@ push_with_rebase() {
 # Commit the CHANGELOG entry back to the default branch so users see the release
 # notes. package.json stays dirty (npm is the source of truth for version). A
 # bot identity and `[skip ci]` keep the resulting push from spawning another
-# workflow run. The tag is created AFTER this commit (and only if it reached the
-# branch) so HEAD == tag SHA and the next run sees "HEAD is already tagged".
-RELEASE_DOCS_PUSH_FAILED=0
-DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+# workflow run. A push failure here still fails the run LOUDLY (the release notes
+# are part of the release), but the tag above has already landed, so a retry or
+# the next run cannot re-process these commits — it only needs to re-push docs.
+#
+# actions/checkout leaves the runner in detached HEAD even for `push` events,
+# so `git rev-parse --abbrev-ref HEAD` returns the literal string "HEAD", not
+# the branch name — that would push to the bogus ref "HEAD:HEAD". GITHUB_REF_NAME
+# is the actual triggering branch in Actions; only fall back to git for local runs.
+DEFAULT_BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 if git diff --quiet -- CHANGELOG.md; then
@@ -460,9 +475,10 @@ else
   # Push to the default branch explicitly so this works whether actions/checkout
   # left us on a branch or in detached HEAD state. Rebase-on-reject so a racing
   # merge to the branch mid-run can't strand the release (npm already published).
-  if ! push_with_rebase "$DEFAULT_BRANCH" 4 2; then
-    log "⚠️ Failed to push release-docs update. Release was published; docs can be updated manually."
-    RELEASE_DOCS_PUSH_FAILED=1
+  if ! retry_cmd push_with_rebase "HEAD:$DEFAULT_BRANCH" 4 2; then
+    log "Error: failed to push the release-docs update for v$NEW_VERSION."
+    log "       The release is published and tagged; push the CHANGELOG commit manually."
+    exit 1
   fi
 fi
 
