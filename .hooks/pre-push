@@ -61,7 +61,26 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   # Redirect stdin from /dev/null: git feeds this loop the ref list on stdin,
   # and pre-commit (and the tools it drives) would otherwise inherit and consume
   # it, so a multi-ref push would check only the first range.
-  "${precommit_cmd[@]}" run --from-ref "$from_ref" --to-ref "$local_sha" --show-diff-on-failure </dev/null
+  #
+  # Capture output so a hook-ENVIRONMENT provisioning failure degrades to a loud
+  # skip instead of blocking the push: in a restricted-egress sandbox pre-commit
+  # can't download a linter's binary (e.g. shellcheck/shfmt fetch from GitHub
+  # releases -> HTTP 403) and hard-fails the install before running anything.
+  # That is not a lint failure and must not strand the push — CI (pre-commit.yaml)
+  # re-runs the full suite on the PR. A genuine lint/format failure still aborts:
+  # we swallow ONLY pre-commit's install-error signatures, never a normal
+  # non-zero from a hook that actually ran.
+  precommit_rc=0
+  precommit_out=$("${precommit_cmd[@]}" run --from-ref "$from_ref" --to-ref "$local_sha" --show-diff-on-failure </dev/null 2>&1) ||
+    precommit_rc=$?
+  printf '%s\n' "$precommit_out"
+  if [[ "$precommit_rc" -ne 0 ]]; then
+    if grep -qE 'InstallError|failed-wheel-build-for-install|Failed building wheel|An error has occurred while installing|HTTP Error 40[37]' <<<"$precommit_out"; then
+      echo "pre-push: pre-commit could not PROVISION a hook environment (network/egress blocked, not a lint failure) — SKIPPING the pushed-range run. CI still enforces the full suite on the PR." >&2
+      continue
+    fi
+    exit "$precommit_rc"
+  fi
 done
 
 # Portable-symlink check: rejects a tracked symlink with an absolute target

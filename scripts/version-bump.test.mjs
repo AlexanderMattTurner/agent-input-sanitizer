@@ -41,6 +41,16 @@ test("the deduplicated duplicate release scripts stay gone", () => {
     false,
     "scripts/promote-changelog.mjs must not exist; .github/scripts is the single source of truth",
   );
+  // The template ships its own version-bump.test.mjs alongside the script; a
+  // template-sync drops it into .github/scripts/ where it re-tests the TEMPLATE's
+  // release design (plain-string `npm view`, GITHUB_TOKEN-only push) against this
+  // repo's hardened live script and fails 5/6. This file is the single test copy;
+  // the template duplicate must not reappear.
+  assert.equal(
+    existsSync(join(REPO_ROOT, ".github", "scripts", "version-bump.test.mjs")),
+    false,
+    ".github/scripts/version-bump.test.mjs must not exist; scripts/version-bump.test.mjs is the single test copy",
+  );
 });
 
 test("auto-version.yaml invokes exactly the live hardened release script", () => {
@@ -258,3 +268,118 @@ for (const { name, subject, body } of [
     }
   });
 }
+
+// --- Release-docs push races a concurrent branch advance -------------------
+// The auto-version concurrency group serializes this workflow, but the default
+// branch can still move mid-run via an ordinary PR merge from another actor. The
+// run then holds a stale tip and its `git push HEAD:main` is rejected
+// non-fast-forward. A plain retry can never win (the remote never rewinds); the
+// script must fetch the new tip, rebase the release-docs commit onto it, and
+// retry. This exercises the REAL script against a real bare remote that advances
+// out from under it, and proves the release lands without clobbering the racing
+// commit.
+
+test("release-docs push rebases onto a branch that advanced mid-run", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vbump-race-"));
+  const remote = join(dir, "remote.git");
+  const work = join(dir, "work");
+  const other = join(dir, "other");
+
+  // npm stub: base is 1.0.0 (live), the target 1.1.0 is not yet published (so
+  // the run proceeds to publish), every deprecation probe reports "live".
+  const npmStub = `if [[ "$2" == *@* ]]; then
+  if [[ "$3" == "version" ]]; then exit 1; fi
+  exit 0
+else
+  echo '["1.0.0"]'
+fi`;
+  const changelog = "# Changelog\n\n## Unreleased\n\n### Added\n\n- A thing.\n";
+
+  const gitW = (...args) =>
+    execFileSync("git", args, { cwd: work, stdio: "ignore" });
+  const gitO = (...args) =>
+    execFileSync("git", args, { cwd: other, stdio: "ignore" });
+
+  try {
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+
+    mkdirSync(work);
+    gitW("init", "-q", "-b", "main");
+    gitW("config", "user.email", "t@t.test");
+    gitW("config", "user.name", "t");
+    writeFileSync(
+      join(work, "package.json"),
+      JSON.stringify({ name: "sandbox-pkg", version: "1.0.0" }) + "\n",
+    );
+    writeFileSync(join(work, "CHANGELOG.md"), changelog);
+    const binDir = join(work, "stub-bin");
+    mkdirSync(binDir);
+    writeFileSync(join(binDir, "npm"), `#!/usr/bin/env bash\n${npmStub}\n`);
+    chmodSync(join(binDir, "npm"), 0o755);
+    // pnpm publish must succeed without leaving the sandbox.
+    writeFileSync(
+      join(binDir, "pnpm"),
+      "#!/usr/bin/env bash\necho 'stub publish ok'\nexit 0\n",
+    );
+    chmodSync(join(binDir, "pnpm"), 0o755);
+    gitW("add", "-A");
+    gitW("commit", "-q", "-m", "chore: seed");
+    gitW("tag", "v1.0.0");
+    gitW("remote", "add", "origin", remote);
+    gitW("push", "-q", "origin", "main");
+    gitW("push", "-q", "origin", "v1.0.0");
+    // A release-worthy commit the run will publish.
+    gitW("commit", "-q", "--allow-empty", "-m", "feat: add a thing");
+
+    // Simulate a concurrent PR merge advancing origin/main out from under the
+    // run: a second clone pushes a commit that does NOT touch CHANGELOG.md.
+    execFileSync("git", ["clone", "-q", remote, other], { stdio: "ignore" });
+    gitO("config", "user.email", "o@o.test");
+    gitO("config", "user.name", "o");
+    writeFileSync(join(other, "OTHER.txt"), "concurrent work\n");
+    gitO("add", "-A");
+    gitO("commit", "-q", "-m", "chore: concurrent merge");
+    gitO("push", "-q", "origin", "main");
+
+    const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
+    delete env.ANTHROPIC_API_KEY;
+    delete env.GITHUB_OUTPUT;
+    // In CI these name the PR's merge ref (e.g. 167/merge), and the script reads
+    // GITHUB_REF_NAME as the branch to push the release-docs commit to. Left set,
+    // the run would target that ref instead of the sandbox repo's `main`, so the
+    // rebase-on-reject path never fires and the test fails only under Actions.
+    delete env.GITHUB_REF_NAME;
+    delete env.GITHUB_REF;
+    const res = spawnSync("bash", [LIVE_SCRIPT], {
+      cwd: work,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(res.error, undefined, "failed to spawn the release script");
+    assert.equal(res.status, 0, res.stderr);
+
+    // Proves we went through the rebase-on-reject path, not a lucky
+    // fast-forward — guards the test against passing vacuously.
+    assert.match(res.stderr, /rejected \(attempt \d+\/\d+\); rebasing/);
+
+    // The release-docs commit and tag reached the remote, stacked ON TOP of the
+    // racing commit (a force-push would have erased it).
+    const remoteSubjects = execFileSync(
+      "git",
+      ["-C", remote, "log", "main", "--pretty=%s"],
+      { encoding: "utf8" },
+    );
+    assert.match(remoteSubjects, /docs: release 1\.1\.0/);
+    assert.match(
+      remoteSubjects,
+      /chore: concurrent merge/,
+      "the concurrent commit must survive — the push must rebase, never force",
+    );
+    const remoteTags = execFileSync("git", ["-C", remote, "tag"], {
+      encoding: "utf8",
+    });
+    assert.match(remoteTags, /^v1\.1\.0$/m, "the release tag must be pushed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
