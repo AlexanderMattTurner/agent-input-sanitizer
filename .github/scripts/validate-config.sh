@@ -58,20 +58,14 @@ for f in .hooks/* .claude/hooks/*; do
       error "$f has a python syntax error: $py_err"
     fi
     ;;
-<<<<<<< local
-  *.mjs | *.js)
-    if ! js_err=$(node --check "$f" 2>&1); then
-      error "$f has a JavaScript syntax error: $js_err"
+  *.mjs | *.cjs | *.js)
+    if ! node_err=$(node --check "$f" 2>&1); then
+      error "$f has a JavaScript syntax error: $node_err"
     fi
     ;;
   *.json)
     if ! json_err=$(python3 -m json.tool "$f" 2>&1 >/dev/null); then
       error "$f is not valid JSON: $json_err"
-=======
-  *.mjs | *.cjs | *.js)
-    if ! node_err=$(node --check "$f" 2>&1); then
-      error "$f has a JavaScript syntax error: $node_err"
->>>>>>> template
     fi
     ;;
   *)

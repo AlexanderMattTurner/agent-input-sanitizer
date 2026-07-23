@@ -79,32 +79,6 @@ fi
 # their bot name this will silently return no results.
 socket_found=false
 socket_tmp=$(mktemp)
-<<<<<<< local
-trap 'rm -f "$socket_tmp"' EXIT
-while IFS= read -r pr_num; do
-  [[ -n "$pr_num" ]] || continue
-  # Fetch once into a temp file; avoids a second API call and command
-  # substitution (which strips trailing newlines and merges multi-comment output).
-  if ! gh api "repos/${REPO}/issues/${pr_num}/comments?per_page=30" \
-    --jq '.[] | select(.user.login == "socket-security[bot]") | .body' \
-    >"$socket_tmp" 2>/dev/null; then
-    # Tolerate a single PR's comment fetch failing (permissions/transient API
-    # error) — it must not abort the whole security report. Reset to empty so a
-    # prior iteration's content can't leak into this PR's section.
-    : >"$socket_tmp"
-  fi
-  if [[ -s "$socket_tmp" ]]; then
-    socket_found=true
-    {
-      echo "### PR #${pr_num}"
-      cat "$socket_tmp"
-      echo ""
-    } >>"$REPORT_PATH"
-  fi
-done < <(gh api "repos/${REPO}/pulls?state=open&per_page=5" --jq '.[].number' 2>/dev/null)
-if [[ "$socket_found" = "false" ]]; then
-  echo "_No Socket.dev alerts found in recent open PRs._" >>"$REPORT_PATH"
-=======
 pr_list_tmp=$(mktemp)
 pr_list_err=$(mktemp)
 trap 'rm -f "$socket_tmp" "$pr_list_tmp" "$pr_list_err"' EXIT
@@ -140,7 +114,6 @@ if gh api "repos/${REPO}/pulls?state=open&per_page=5" --jq '.[].number' \
   fi
 else
   echo "_Could not fetch open PRs for Socket.dev scan (check repo permissions)._" >>"$REPORT_PATH"
->>>>>>> template
 fi
 
 cat "$REPORT_PATH"

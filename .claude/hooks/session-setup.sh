@@ -56,31 +56,10 @@ go_install_pinned() {
 apt_updated=0
 apt_install_if_missing() {
   local cmd="$1" pkg="${2:-$1}"
-<<<<<<< local
   command -v "$cmd" &>/dev/null && return 0
   if ! is_root || ! command -v apt-get &>/dev/null; then
     warn "$cmd not found and cannot be auto-installed (needs root + apt); install it manually"
     return 0
-=======
-  if ! command -v "$cmd" &>/dev/null; then
-    local installer
-    installer=$(mktemp "${TMPDIR:-/tmp}/webi-${cmd}-XXXXXX.sh")
-    # webi.sh serves a per-tool bootstrap generated on the fly, so there is no
-    # stable digest to pin; we harden with HTTPS-only (--proto =https), the
-    # shebang check below, and a version-pinned $pkg instead.
-    # pin-exempt: webi.sh bootstrap is generated per-request, no stable digest
-    if curl --proto '=https' -fsSL "https://webi.sh/$pkg" -o "$installer" 2>/dev/null; then
-      first_line="$(head -n 1 "$installer")"
-      if grep -q '^#!' <<<"$first_line"; then
-        sh "$installer" >/dev/null 2>&1 || warn "Failed to install $cmd"
-      else
-        warn "Installer for $cmd is not a shell script (missing shebang) — skipping"
-      fi
-    else
-      warn "Failed to download installer for $cmd"
-    fi
-    rm -f "$installer"
->>>>>>> template
   fi
   if [ "$apt_updated" -eq 0 ]; then
     apt-get update -qq || warn "apt-get update failed"

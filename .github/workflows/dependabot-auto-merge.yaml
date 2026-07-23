@@ -21,7 +21,6 @@ jobs:
   auto-merge:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-<<<<<<< local
     # Gate on the PR *author* (GitHub-set, not spoofable) and require a same-repo
     # branch, so a fork PR can never reach the contents:write auto-merge path.
     # NB: we deliberately do NOT gate on `github.actor`/`github.triggering_actor`
@@ -31,15 +30,6 @@ jobs:
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
-=======
-    # Gate on the PR author from the event payload. We deliberately do NOT add
-    # a `github.actor == 'dependabot[bot]'` clause to also pin the pusher: the
-    # zizmor `bot-conditions` audit flags github.actor as a spoofable actor
-    # context (a HIGH finding). A collaborator pushing onto a dependabot branch
-    # is already contained by branch protection — auto-merge only sets the flag,
-    # so the pushed commit must still pass every required check before it merges.
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
->>>>>>> template
     steps:
       # Verifies the PR is a genuine Dependabot update and exposes its metadata;
       # the step (and thus the whole job) fails if it is not from Dependabot.

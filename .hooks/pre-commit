@@ -39,7 +39,6 @@ fi
 # the commit, but WARN loudly on stderr: a silent skip lets a fresh clone commit
 # with zero lint/format enforcement and no signal that anything was bypassed.
 if [[ ! -f "$git_root/node_modules/.bin/lint-staged" ]]; then
-<<<<<<< local
   # Fail open (a fresh clone must still be able to commit) but never silently:
   # an unwarned skip here let unformatted/unchecked changes land more than once.
   {
@@ -49,9 +48,6 @@ if [[ ! -f "$git_root/node_modules/.bin/lint-staged" ]]; then
     echo "Run 'pnpm install' to restore them."
     echo "=================================================================="
   } >&2
-=======
-  echo "pre-commit: lint-staged not installed — lint/format checks SKIPPED for this commit; run pnpm install to enable them." >&2
->>>>>>> template
   exit 0
 fi
 
@@ -78,15 +74,9 @@ if command -v pnpm >/dev/null 2>&1; then
 elif command -v npm >/dev/null 2>&1; then
   npx lint-staged --allow-empty
 else
-<<<<<<< local
-  # Neither package manager is on PATH, but the lint-staged binary exists (the
-  # guard above already returned when it did not). Run it directly rather than
-  # skipping staged-file formatting silently.
-=======
   # lint-staged is installed (guarded above) but no package manager is on PATH:
   # run the binary directly rather than silently exiting 0 and committing with
   # zero lint/format enforcement.
   echo "pre-commit: neither pnpm nor npm on PATH — invoking lint-staged directly." >&2
->>>>>>> template
   "$git_root/node_modules/.bin/lint-staged" --allow-empty
 fi

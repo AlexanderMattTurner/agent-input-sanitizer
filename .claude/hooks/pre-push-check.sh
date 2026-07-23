@@ -81,14 +81,6 @@ fi
 # Python checks. Fail closed: if the project is Python but no runner is
 # available, that is a broken environment, not a reason to silently skip lint.
 if [[ -f pyproject.toml ]] || [[ -f uv.lock ]]; then
-<<<<<<< local
-  PREFIX=""
-  [[ -f uv.lock ]] && exists uv && PREFIX="uv run "
-  if [[ -n "$PREFIX" ]] || exists ruff; then
-    run_check "ruff" "${PREFIX}ruff check ."
-  else
-    echo "=== ruff SKIPPED — neither uv nor ruff on PATH; failing closed ===" >&2
-=======
   if [[ -f uv.lock ]] && exists uv; then
     run_check "ruff" uv run ruff check .
   elif exists ruff; then
@@ -96,7 +88,6 @@ if [[ -f pyproject.toml ]] || [[ -f uv.lock ]]; then
   else
     echo "=== ruff FAILED ===" >&2
     echo "Neither ruff nor uv (with uv.lock) is available to run Python checks." >&2
->>>>>>> template
     FAILED=1
   fi
 fi
