@@ -30,7 +30,7 @@ name = "agent-input-sanitizer"
 version = "0.0.0"
 description = "Python client for agent-input-sanitizer: a thin bridge to the Node.js CLI for byte-identical sanitization verdicts."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 # SPDX expression (PEP 639), matching the repo's actual license (LICENSE at repo
 # root) and package.json's npm-side "license": "Apache-2.0" — the wheel bundles a
 # build of src/, which is Apache-2.0 (with NOTICE/patent-grant clauses MIT does

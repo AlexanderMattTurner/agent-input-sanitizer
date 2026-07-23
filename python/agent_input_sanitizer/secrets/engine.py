@@ -489,13 +489,18 @@ def _is_markdown_code_prose(value: str) -> bool:
 #   • A bare attribute chain rooted at settings./config./environ./self — the
 #     Django/Flask/Pydantic idiom. This root IS forgeable, so it is trusted only
 #     off web ingress; the prefix detectors run first and remain the floor.
-# The attribute/index chain uses a POSSESSIVE quantifier (`*+`) so the trailing
-# \Z can't drive O(n^2) backtracking on a long near-match.
+# The attribute/index chain must not drive O(n^2) backtracking against the
+# trailing \Z on a long near-match. A possessive quantifier (`*+`) would say this
+# directly, but `re` only learned possessive quantifiers in Python 3.11, and the
+# package floor is 3.10 — so we emulate the same "match maximally, never give it
+# back" semantics with the portable `(?=(...))\1` idiom: the lookahead captures
+# the greedy maximal chain, then the backreference re-consumes exactly those bytes
+# as a fixed string, which cannot backtrack. Behaviourally identical to `*+`.
 _ENV_REFERENCE_RE = re.compile(
     r"(?:\$[A-Za-z_]\w*"
     r"|(?:process\.env|import\.meta\.env|os\.environ|Deno\.env"
     r"|settings|config|environ|self))"
-    r"(?:\.[A-Za-z_]\w*|\[[^\[\]]*\])*+\Z"
+    r"(?=(?P<_env_chain>(?:\.[A-Za-z_]\w*|\[[^\[\]]*\])*))(?P=_env_chain)\Z"
 )
 
 # The bare-word roots (settings/config/environ/self) are a CONVENTION: an
