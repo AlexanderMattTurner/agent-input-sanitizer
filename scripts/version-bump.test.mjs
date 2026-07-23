@@ -344,6 +344,12 @@ fi`;
     const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
     delete env.ANTHROPIC_API_KEY;
     delete env.GITHUB_OUTPUT;
+    // In CI these name the PR's merge ref (e.g. 167/merge), and the script reads
+    // GITHUB_REF_NAME as the branch to push the release-docs commit to. Left set,
+    // the run would target that ref instead of the sandbox repo's `main`, so the
+    // rebase-on-reject path never fires and the test fails only under Actions.
+    delete env.GITHUB_REF_NAME;
+    delete env.GITHUB_REF;
     const res = spawnSync("bash", [LIVE_SCRIPT], {
       cwd: work,
       env,

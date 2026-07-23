@@ -424,6 +424,11 @@ fi
 # over the other commit. A transient network failure degrades to the same
 # fetch-then-retry path (the fetch also fails, we back off and retry the push).
 # $1: branch, $2: max attempts, $3: initial backoff seconds (doubles each retry).
+#
+# allow-externalized-marker: the `git rebase` below is history-rewriting, but the
+# invoking job (auto-version.yaml) checks out with `fetch-depth: 0`, which is the
+# invariant the externalized-marker guard exists to protect — a full history is
+# present, so replaying the release-docs commit onto the advanced tip is sound.
 push_with_rebase() {
   local branch="$1" max="$2" delay="$3" attempt=1
   while [[ "$attempt" -le "$max" ]]; do
