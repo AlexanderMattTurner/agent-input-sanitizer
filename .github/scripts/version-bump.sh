@@ -456,14 +456,15 @@ push_with_rebase() {
 # Commit the CHANGELOG entry back to the default branch so users see the release
 # notes. package.json stays dirty (npm is the source of truth for version). A
 # bot identity and `[skip ci]` keep the resulting push from spawning another
-# workflow run. A push failure here still fails the run LOUDLY (the release notes
-# are part of the release), but the tag above has already landed, so a retry or
-# the next run cannot re-process these commits — it only needs to re-push docs.
+# workflow run. The tag is created AFTER this commit (and only when it reached
+# the branch — see RELEASE_DOCS_PUSH_FAILED) so HEAD == tag SHA and the next run
+# sees "HEAD is already tagged".
 #
 # actions/checkout leaves the runner in detached HEAD even for `push` events,
 # so `git rev-parse --abbrev-ref HEAD` returns the literal string "HEAD", not
 # the branch name — that would push to the bogus ref "HEAD:HEAD". GITHUB_REF_NAME
 # is the actual triggering branch in Actions; only fall back to git for local runs.
+RELEASE_DOCS_PUSH_FAILED=0
 DEFAULT_BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -475,10 +476,9 @@ else
   # Push to the default branch explicitly so this works whether actions/checkout
   # left us on a branch or in detached HEAD state. Rebase-on-reject so a racing
   # merge to the branch mid-run can't strand the release (npm already published).
-  if ! retry_cmd push_with_rebase "HEAD:$DEFAULT_BRANCH" 4 2; then
-    log "Error: failed to push the release-docs update for v$NEW_VERSION."
-    log "       The release is published and tagged; push the CHANGELOG commit manually."
-    exit 1
+  if ! push_with_rebase "$DEFAULT_BRANCH" 4 2; then
+    log "⚠️ Failed to push release-docs update. Release was published; docs can be updated manually."
+    RELEASE_DOCS_PUSH_FAILED=1
   fi
 fi
 
