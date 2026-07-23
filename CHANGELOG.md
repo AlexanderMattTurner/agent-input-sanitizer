@@ -8,6 +8,19 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [1.47.14] - 2026-07-23
+
+### Changed
+
+- test(ci): stop leaking GITHUB_REF_NAME into the release-race test, annotate rebase marker
+- test(ci): drop incompatible template-synced version-bump test
+- ci: skip pushed-range pre-commit run when a hook can't be provisioned
+- fix(ci): repair botched auto-merge of release-docs push logic
+- fix(ci): rebase release-docs push when main advances mid-run
+- docs: release 1.47.13 [skip ci]
+- chore: resolve template-sync merge conflicts
+- chore: sync from template repository (f2b22de)
+
 ## [1.47.13] - 2026-07-23
 
 ### Changed
