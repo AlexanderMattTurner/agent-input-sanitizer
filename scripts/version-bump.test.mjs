@@ -41,6 +41,16 @@ test("the deduplicated duplicate release scripts stay gone", () => {
     false,
     "scripts/promote-changelog.mjs must not exist; .github/scripts is the single source of truth",
   );
+  // The template ships its own version-bump.test.mjs alongside the script; a
+  // template-sync drops it into .github/scripts/ where it re-tests the TEMPLATE's
+  // release design (plain-string `npm view`, GITHUB_TOKEN-only push) against this
+  // repo's hardened live script and fails 5/6. This file is the single test copy;
+  // the template duplicate must not reappear.
+  assert.equal(
+    existsSync(join(REPO_ROOT, ".github", "scripts", "version-bump.test.mjs")),
+    false,
+    ".github/scripts/version-bump.test.mjs must not exist; scripts/version-bump.test.mjs is the single test copy",
+  );
 });
 
 test("auto-version.yaml invokes exactly the live hardened release script", () => {
