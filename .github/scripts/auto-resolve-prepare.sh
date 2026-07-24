@@ -20,10 +20,11 @@
 #   needs_commit=true   there is a resolution (deterministic and/or LLM) to commit
 #   protected_paths=... conflicted paths in PROTECTED areas
 #
-# A conflict touching a PROTECTED path (this repo's Claude config or its CI
-# machinery) is handed to the LLM like any other; the paths are reported via
-# `protected_paths` so the FINALIZE step can flag them for human review in the
-# comment it posts with the pushed resolution. Prepare itself never talks to
+# A conflict touching a PROTECTED path (by default this repo's Claude config or
+# its CI machinery — override with AUTO_RESOLVE_PROTECTED_RE) is handed to the LLM
+# like any other; the paths are reported via `protected_paths` so the FINALIZE
+# step can flag them for human review in the comment it posts with the pushed
+# resolution. Prepare itself never talks to
 # GitHub — a run that ends up resolving nothing must say nothing. A clean merge
 # is a no-op.
 #
@@ -64,6 +65,7 @@ fi
 # whole generated-file classification collapses to empty) when the repo has no
 # such script.
 if has_resolve_generated; then
+  # echo-fallback-ok: regeneration is best-effort by design; the finalize unmerged-check is the real gate
   pnpm resolve-generated || echo "resolve-generated made no change (or errored) — continuing."
 else
   echo "no resolve-generated script defined — skipping deterministic generated-file pre-pass."
@@ -136,7 +138,12 @@ fi
 # (.github/ — workflows, scripts, and the composite actions that run with the
 # job's write token). These are still handed to the LLM; finalize flags them for
 # human review in the comment posted with the pushed resolution.
-protected='^(\.claude/|\.github/)'
+#
+# Override the protected set with AUTO_RESOLVE_PROTECTED_RE (an ERE tested against
+# each conflicted path): a repo with more sensitive trees widens it (e.g.
+# '^(\.claude/|\.github/|infra/|secrets/)'); the default keeps this template's two
+# areas.
+protected="${AUTO_RESOLVE_PROTECTED_RE:-^(\.claude/|\.github/)}"
 protected_hits=()
 for f in "${conflicts[@]}"; do
   [[ "$f" =~ $protected ]] && protected_hits+=("$f")

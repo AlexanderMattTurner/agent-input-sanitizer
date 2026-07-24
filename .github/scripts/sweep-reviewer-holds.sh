@@ -29,10 +29,17 @@ prs_json="$(gh pr list --repo "$GH_REPO" --state open --limit "$SWEEP_PR_LIMIT" 
 if [[ "$(jq 'length' <<<"$prs_json")" -ge "$SWEEP_PR_LIMIT" ]]; then
   echo "::warning::sweep-reviewer-holds: open-PR page hit the ${SWEEP_PR_LIMIT} cap; PRs beyond this are not swept. Raise SWEEP_PR_LIMIT or paginate." >&2
 fi
-mapfile -t prs < <(
+pr_numbers="$(
   jq -r '.[] | select(.isDraft == false) | select(.author.is_bot == false) | .number' \
     <<<"$prs_json"
-)
+)" || {
+  echo "::error::sweep-reviewer-holds: jq failed to filter the open-PR list" >&2
+  exit 1
+}
+prs=()
+if [[ -n "$pr_numbers" ]]; then
+  mapfile -t prs <<<"$pr_numbers"
+fi
 
 status=0
 for pr in "${prs[@]}"; do

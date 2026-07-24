@@ -73,6 +73,7 @@ done
 
 blocked="$(jq -c '[.[] | select(.state == "OPEN" and .mergeable == "CONFLICTING"
   and any(.labels[]; .name == "auto-resolve-blocked")) | .number]' <<<"$candidates")"
+# echo-fallback-ok: informational skip notice; the empty-list branch is the decision, not this echo
 [[ "$blocked" == "[]" ]] || echo "Skipping auto-resolve-blocked PR(s) ${blocked} — remove the label to re-enable auto-resolve for them."
 
 echo "Auto-resolve will process: ${prs}"

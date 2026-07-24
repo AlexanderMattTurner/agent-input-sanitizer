@@ -33,14 +33,31 @@ if [[ -z "$target" ]] || [[ ! -f "$target" ]]; then
   exit 1
 fi
 
-# Fast path: target parses — run it as-is. The PreToolUse stdin payload is
-# inherited automatically because we exec into the target.
-if bash -n "$target" 2>/dev/null; then
-  exec "$target" "$@"
+# Language-aware syntax check + interpreter-explicit exec. Bash for shell hooks,
+# node for JS. Running the target THROUGH its interpreter (not a bare
+# `exec "$target"`) is a fail-closed guard: a target that lost its +x bit makes
+# `exec "$target"` fail with 126, which Claude Code treats as NON-blocking, so the
+# guarded tool would run unchecked (fail OPEN). `exec bash|node "$target"` ignores
+# the mode bit and always runs the check.
+case "$target" in
+*.mjs | *.cjs | *.js)
+  syntax_check=(node --check "$target")
+  interp=node
+  ;;
+*)
+  syntax_check=(bash -n "$target")
+  interp=bash
+  ;;
+esac
+
+# Fast path: target parses — run it via its interpreter. The PreToolUse stdin
+# payload is inherited automatically because we exec into the target.
+if "${syntax_check[@]}" 2>/dev/null; then
+  exec "$interp" "$target" "$@"
 fi
 
 # Degraded path. Read the PreToolUse payload before we touch stdin again.
-parse_error=$(bash -n "$target" 2>&1)
+parse_error=$("${syntax_check[@]}" 2>&1)
 echo "safe-launch: target hook failed to parse — degrading open: $target" >&2
 [[ -n "$parse_error" ]] && echo "$parse_error" >&2
 
@@ -65,6 +82,9 @@ fi
 is_under() {
   local candidate="$1" parent="$2" parent_dir resolved
   [[ -n "$candidate" ]] && [[ -n "$parent" ]] || return 1
+  # Filter — a candidate with no ".." segment correctly falls through to the
+  # containment check below; only a traversal-shaped path short-circuits here.
+  # case-default-ok: no-match is the intended no-op, not a missed case.
   case "$candidate" in *..*) return 1 ;; esac
   # The parent dir is resolved with `pwd -P`, but the leaf is not: a symlinked
   # leaf (e.g. .claude/hooks/evil -> /etc/cron.d/x) would pass containment while
@@ -82,6 +102,9 @@ is_under() {
   esac
 }
 
+# Filter — only edit-shaped tools get the self-repair containment check;
+# every other tool name correctly falls through to the "ask" default below.
+# case-default-ok: no-match is the intended fall-through, not a missed case.
 case "$tool_name" in
 Edit | Write | MultiEdit | NotebookEdit)
   for safe in "$project_dir/.claude/hooks" "$project_dir/.hooks"; do

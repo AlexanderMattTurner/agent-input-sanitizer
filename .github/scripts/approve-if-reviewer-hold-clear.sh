@@ -98,6 +98,7 @@ if [[ "${total:-0}" -eq 0 ]]; then
   # sweep sets no BODY_VERDICT_FILE, so a body hold never clears on the sweep.
   body_addressed=false
   if [[ -n "${BODY_VERDICT_FILE:-}" && -f "$BODY_VERDICT_FILE" ]]; then
+    # echo-fallback-ok: fail-closed default: an unreadable verdict file reads as not-addressed, holding the approval
     body_addressed="$(jq -r '(.body.addressed == true)' "$BODY_VERDICT_FILE" 2>/dev/null || echo false)"
   fi
   if [[ "$body_addressed" != "true" ]]; then

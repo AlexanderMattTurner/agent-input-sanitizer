@@ -19,7 +19,9 @@ marker_re='^(<{7}|={7}|>{7})([ \t]|$)'
 
 fail() {
   echo "::error::$1"
+  # echo-fallback-ok: abort-path diagnostic to stderr; no merge in progress is an acceptable state here
   git merge --abort || echo "[auto-resolve] merge --abort failed (no merge in progress?)" >&2
+  # echo-fallback-ok: best-effort failure comment; the run is already failing loudly via exit
   gh pr comment "$PR" --body "⚠️ **Auto-resolve could not finish** — $2 Leaving the conflict for a human to resolve." || echo "[auto-resolve] failed to post failure comment on PR #${PR}" >&2
   exit 1
 }
@@ -71,6 +73,7 @@ fi
 # repo has a resolve-generated script (else DEFERRED_REGEN is always empty).
 read -ra deferred_list <<<"${DEFERRED_REGEN:-}"
 if [[ ${#deferred_list[@]} -gt 0 ]] && has_resolve_generated; then
+  # echo-fallback-ok: regeneration is best-effort by design; the unmerged check below is the real gate
   pnpm resolve-generated || echo "resolve-generated errored — the unmerged check below decides."
   still_unmerged=()
   for f in "${deferred_list[@]}"; do
@@ -94,6 +97,7 @@ fi
 scan_paths=("${allowed_list[@]}" "${deferred_list[@]}")
 if [[ ${#scan_paths[@]} -gt 0 ]] && git grep -nE "$marker_re" -- "${scan_paths[@]}" >/dev/null 2>&1; then
   echo "Conflict markers still present:"
+  # echo-fallback-ok: re-scan error is reported to stderr; the grep hit/miss is consumed separately
   git grep -nE "$marker_re" -- "${scan_paths[@]}" || echo "[auto-resolve] conflict-marker re-scan errored" >&2
   # Distinguish "the LLM judged the conflict too hard and left markers on purpose"
   # (the safe, intended handoff) from "the LLM was DENIED permission to write and
@@ -124,8 +128,10 @@ fi
 # provisions the secret and removes the label. Checked before the commit so
 # fail()'s `git merge --abort` cleanly unwinds the in-progress merge.
 if [[ -z "${TEMPLATE_SYNC_TOKEN:-}" ]]; then
+  # echo-fallback-ok: label creation races another run creating it; the add-label below is the operative step
   gh label create auto-resolve-blocked --color e4e669 --force \
     --description "Auto-resolve cannot push to this PR; remove the label to let it retry" || echo "[auto-resolve] gh label create failed" >&2
+  # echo-fallback-ok: best-effort label add; failure is logged to stderr and the run still exits red
   gh pr edit "$PR" --add-label auto-resolve-blocked || echo "[auto-resolve] failed to add auto-resolve-blocked label to PR #${PR}" >&2
   fail "no push token configured (TEMPLATE_SYNC_TOKEN is unset)" \
     "the resolution was computed but cannot be pushed: no \`TEMPLATE_SYNC_TOKEN\` secret is set (a PAT with the \`workflow\` scope is required to push a merge that may touch workflow files and to retrigger CI). Set it, then remove the \`auto-resolve-blocked\` label to let auto-resolve retry — while it is present this PR is skipped."
@@ -161,8 +167,10 @@ export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}"
 if ! push_out="$(git push origin "HEAD:${HEAD_REF}" 2>&1)"; then
   printf '%s\n' "$push_out" >&2
   if grep -qE 'refusing to allow .* workflow' <<<"$push_out"; then
+    # echo-fallback-ok: label creation races another run creating it; the add-label below is the operative step
     gh label create auto-resolve-blocked --color e4e669 --force \
       --description "Auto-resolve cannot push to this PR; remove the label to let it retry" || echo "[auto-resolve] gh label create failed" >&2
+    # echo-fallback-ok: best-effort label add; failure is logged to stderr and the run still exits red
     gh pr edit "$PR" --add-label auto-resolve-blocked || echo "[auto-resolve] failed to add auto-resolve-blocked label to PR #${PR}" >&2
     fail "push rejected: the merge touches .github/workflows/ and the push token lacks the workflow scope" \
       "the resolved merge carries workflow-file changes from \`${BASE_REF}\`, and the \`TEMPLATE_SYNC_TOKEN\` push token lacks the \`workflow\` scope. Grant it the \`workflow\` scope (or resolve the conflict locally), then remove the \`auto-resolve-blocked\` label to let auto-resolve retry — while it is present this PR is skipped."
@@ -176,4 +184,5 @@ if [[ -n "${PROTECTED_PATHS:-}" ]]; then
   protected_note=" ⚠️ This resolution touched protected path(s) (\`${PROTECTED_PATHS}\`) — review the merge-resolution delta before merging."
 fi
 
+# echo-fallback-ok: best-effort success comment; the pushed merge commit is the actual outcome
 gh pr comment "$PR" --body "🤖 **Auto-resolved the merge conflict with \`${BASE_REF}\`** — deterministic regeneration of generated files (when configured) plus LLM resolution of the remaining source conflicts, merged in. CI will re-run; this PR still needs its normal review and green checks before it can merge.${protected_note}" || echo "[auto-resolve] failed to post success comment on PR #${PR}" >&2
