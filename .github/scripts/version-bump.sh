@@ -35,6 +35,9 @@ emit_output() {
 # safeguard against the template publishing itself, so it fails CLOSED: anything
 # other than a clean true/false from node (missing/malformed package.json, no
 # node) aborts the run rather than falling through to publish.
+# "error" is a deliberate sentinel — the case below has an explicit `*)` arm
+# that fails loud on it (and on any other unexpected value), so the fallback
+# is caught, never silently treated as "false". echo-fallback-ok: see the case.
 IS_PRIVATE=$(node -p "require('./package.json').private === true" 2>/dev/null || echo "error")
 case "$IS_PRIVATE" in
 true)
@@ -84,6 +87,7 @@ determine_bump() {
   fi
 }
 
+<<<<<<< local
 # Echo the larger of two dotted "X.Y.Z" versions per `sort -V`. An empty input
 # sorts as the smallest possible version, so max_version("","1.2.3") == "1.2.3".
 max_version() {
@@ -158,13 +162,45 @@ else
     exit 1
   fi
 fi
+=======
+# Get the latest published version from npm (source of truth). Distinguish a
+# genuinely-unpublished package (npm's 404) from any other failure (network
+# blip, registry auth, rate limit): folding every failure into "0.0.0" would
+# make a transient outage look identical to "first release" and walk the
+# version from scratch on top of whatever is already published. stderr is
+# captured separately (not merged with 2>&1) so an npm notice/warning on the
+# success path can never contaminate CURRENT_VERSION.
+PACKAGE_NAME=$(node -p "require('./package.json').name")
+NPM_VIEW_ERR="$(mktemp)"
+trap 'rm -f "$NPM_VIEW_ERR"' EXIT
+if CURRENT_VERSION=$(npm view "$PACKAGE_NAME" version 2>"$NPM_VIEW_ERR"); then
+  :
+elif grep -q "E404" "$NPM_VIEW_ERR"; then
+  CURRENT_VERSION="0.0.0"
+else
+  log "Error: npm view failed for '$PACKAGE_NAME' (not a 404 for an unpublished package):"
+  log "$(cat "$NPM_VIEW_ERR")"
+  exit 1
+fi
+# `npm view` can print nothing on a success exit (never-published package) or
+# emit a prerelease like `1.2.3-beta.0`; take the first line and require strict
+# X.Y.Z so the arithmetic bump below can't silently misfire. Empty -> 0.0.0
+# (first release); any other non-semver value fails loudly.
+CURRENT_VERSION=$(printf '%s\n' "$CURRENT_VERSION" | head -n1)
+[[ -z "$CURRENT_VERSION" ]] && CURRENT_VERSION="0.0.0"
+>>>>>>> template
 if ! [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   log "Error: computed a non-semver current version: '$CURRENT_VERSION'. Refusing to guess a bump."
   exit 1
 fi
 log "Highest live npm version: $CURRENT_VERSION"
 
-# Find the latest version tag to determine which commits to analyze
+# Find the latest version tag to determine which commits to analyze. Empty is
+# a real, handled state — the `if [[ -n "$LAST_TAG" ]]` below branches into a
+# deliberate "no tags yet" path (analyze recent commits), not a silently-masked
+# failure. The workflow always runs fetch-depth:0, so the only realistic cause
+# of git-describe failing here is a genuinely tag-free repo.
+# echo-fallback-ok: empty is explicitly branched on immediately below.
 LAST_TAG=$(git describe --tags --match "v*" --abbrev=0 HEAD 2>/dev/null || echo "")
 
 # The version base must exceed every existing release marker, not just npm. npm
@@ -191,12 +227,18 @@ if [[ -n "$LAST_TAG" ]]; then
   COMMITS_RAW=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s" --no-merges)
   COMMIT_SUBJECTS=$(git log "$LAST_TAG"..HEAD --pretty=format:%s --no-merges)
   COMMIT_MESSAGES=$(git log "$LAST_TAG"..HEAD --pretty=format:%B --no-merges)
+  # DIFF_STAT only ever feeds the Claude changelog-prose prompt as context (see
+  # below) — never the version-bump decision — so a placeholder string here
+  # costs only prose quality, not release correctness.
+  # echo-fallback-ok: prose-only input, never the release decision.
   DIFF_STAT=$(git diff --stat "$LAST_TAG"..HEAD 2>/dev/null || echo "Unable to get diff")
 else
-  # No version tags found — analyze recent commits
+  # No version tags found — analyze recent commits. Same reasoning as the
+  # DIFF_STAT above — prose-only input, never the release decision.
   COMMITS_RAW=$(git log --pretty=format:"- %s" --no-merges -20)
   COMMIT_SUBJECTS=$(git log --pretty=format:%s --no-merges -20)
   COMMIT_MESSAGES=$(git log --pretty=format:%B --no-merges -20)
+  # echo-fallback-ok: prose-only input, never the release decision.
   DIFF_STAT=$(git show --stat HEAD 2>/dev/null || echo "Unable to get diff")
 fi
 

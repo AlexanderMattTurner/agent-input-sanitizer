@@ -23,8 +23,8 @@ on: # zizmor: ignore[dangerous-triggers]
       - Gitleaks Secret Scanning
       - Hook lifecycle
       - Lint
-      - Merge-conflict early warning
       - Node tests
+      - PR meta (privileged)
       - pre-commit
       - Release canary
       - Weekly Security & Dependency Remediation
