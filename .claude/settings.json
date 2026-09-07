@@ -18,7 +18,7 @@
     "agent-sanitizer@agent-sanitizer": true
   },
   "permissions": {
-    "allow": ["Bash(git checkout --theirs *)"],
+    "allow": ["Bash(git checkout --theirs *)", "mcp__Claude_Code_Remote"],
     "deny": [
       "Read(**/.env)",
       "Read(**/.env.*)",
