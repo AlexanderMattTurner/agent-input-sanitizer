@@ -46,6 +46,5 @@ overrides:
   # GHSA-5p4m-2wfm-xmqj — quadratic CPU use parsing !!omap. Via @commitlint/cli.
   js-yaml@>=4.0.0 <4.3.1: "^4.3.1"
   # GHSA-q8mj-m7cp-5q26 / GHSA-4mjr-xmp4-gh2g / GHSA-x5fp-wj9c-mxmx — DoS and
-  # array-limit bypass. Via @stryker-mutator/core. Raised to 6.16.0 from the
-  # prior ^6.15.2 pin (which resolved to 6.15.3, still in the vulnerable range).
+  # array-limit bypass. Via @stryker-mutator/core.
   qs@>=2.2.5 <6.16.0: "^6.16.0"
