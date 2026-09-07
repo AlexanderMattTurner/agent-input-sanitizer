@@ -19,12 +19,7 @@ const NEGATIVE_DECLARATION =
 function isNegativeDeclaration(text) {
   const firstLine = text
     .split("\n")
-    .map((line) =>
-      line
-        .replace(/^[\s\-*>]+/, "")
-        .replace(/\*/g, "")
-        .trim(),
-    )
+    .map((line) => line.replace(/^[\s\-*>]+|\*/g, "").trim())
     .find((line) => line.length > 0);
   return firstLine ? NEGATIVE_DECLARATION.test(firstLine) : false;
 }

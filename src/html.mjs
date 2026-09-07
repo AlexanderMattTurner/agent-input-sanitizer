@@ -2391,6 +2391,9 @@ export const DATA_URI_LENGTH_THRESHOLD = 4096;
 const SCRIPT_URI_RE = /^\s*(?:javascript|vbscript):/i;
 
 const RELATIVE_URL_BASE = "http://relative.invalid";
+// Matches any URL that carries an explicit scheme — used to distinguish an
+// absolute URL from a relative one without keying off the sentinel's own scheme.
+const HAS_SCHEME_RE = /^[a-z][a-z0-9+\-.]*:/i;
 
 // Parameter NAMES that legitimately carry a LONG opaque (base64/hex) value, so
 // a blob in one of them is NOT exfil: CDN request-signing (AWS SigV4 /
@@ -2947,10 +2950,7 @@ export function urlHost(url) {
     // WHATWG rejects (e.g. a non-ASCII host).
     return "(unparsable URL)";
   }
-  if (
-    parsed.origin === RELATIVE_URL_BASE &&
-    !url.startsWith(RELATIVE_URL_BASE)
-  ) {
+  if (parsed.origin === RELATIVE_URL_BASE && !HAS_SCHEME_RE.test(url)) {
     return "(relative URL)";
   }
   return parsed.host;
@@ -2971,9 +2971,7 @@ function isOffOrigin(url) {
   } catch {
     return false;
   }
-  return (
-    parsed.origin !== RELATIVE_URL_BASE || url.startsWith(RELATIVE_URL_BASE)
-  );
+  return parsed.origin !== RELATIVE_URL_BASE || HAS_SCHEME_RE.test(url);
 }
 
 /**
